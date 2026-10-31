@@ -1,0 +1,14 @@
+{
+  "name": "passajh",
+  "version": "0.1.0",
+  "description": "GTA-style interactive maps of Tehran shopping malls: floors, stores, escalators, live discounts and product requests.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
