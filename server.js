@@ -1,20 +1,23 @@
 // Passajh server: static files, mall/store API, product requests and live notifications (SSE).
-// Zero dependencies — run with `node server.js`.
+// Run with `node server.js`. Stores data in data/db.json, or in Neon Postgres when DATABASE_URL is set.
 
 import http from 'node:http';
-import { readFile, writeFile, mkdir, stat } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import { existsSync, readFileSync, createReadStream } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { buildMalls } from './lib/seed.js';
+import { openDb } from './lib/db.js';
 import { CATEGORIES } from './public/shared/catalog.js';
 import { tokens, matchScore, toLatinDigits } from './public/shared/text.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, 'public');
-const DATA = path.join(ROOT, 'data');
-const DB_FILE = path.join(DATA, 'db.json');
+const LAYOUTS = path.join(ROOT, 'data', 'layouts');
+// Vercel's filesystem is read-only except /tmp (which is per-instance and not persistent).
+const DATA = process.env.DATA_DIR || (process.env.VERCEL ? '/tmp/passajh' : path.join(ROOT, 'data'));
 const PORT = Number(process.env.PORT) || 4000;
 
 const MIME = {
@@ -25,15 +28,12 @@ const MIME = {
 
 // ---------- data ----------
 
-await mkdir(DATA, { recursive: true });
-const db = existsSync(DB_FILE)
-  ? JSON.parse(await readFile(DB_FILE, 'utf8'))
-  : { requests: [], offers: [], storeOverrides: {} };
+const db = await openDb({ dir: DATA });
 
 const malls = buildMalls();
 for (const mall of malls) {
   // A surveyed floor plan in data/layouts/<mallId>.json replaces the generated one.
-  const file = path.join(DATA, 'layouts', `${mall.id}.json`);
+  const file = path.join(LAYOUTS, `${mall.id}.json`);
   if (existsSync(file)) mall.floors = JSON.parse(readFileSync(file, 'utf8')).floors;
 }
 
@@ -44,17 +44,23 @@ for (const mall of malls) {
     for (const store of floor.stores) storeById.set(store.id, { store, mall, floor });
   }
 }
-for (const [id, o] of Object.entries(db.storeOverrides)) {
-  const ref = storeById.get(id);
-  if (!ref) continue;
-  if ('discount' in o) ref.store.discount = o.discount;
-  if (o.products) ref.store.products.push(...o.products);
-}
+// Seed discount and product count per store, so seller edits can be re-applied from scratch.
+const base = new Map();
+for (const { store } of storeById.values()) base.set(store.id, { discount: store.discount, products: store.products.length });
 
-let saveTimer = null;
-function save() {
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => writeFile(DB_FILE, JSON.stringify(db, null, 2)).catch(console.error), 200);
+// Seller edits can be made on another server instance, so re-read them from the db every few seconds.
+let syncedAt = 0;
+async function syncOverrides() {
+  if (Date.now() - syncedAt < 3000) return;
+  const overrides = await db.overrides();
+  syncedAt = Date.now();
+  for (const [id, b] of base) {
+    const { store } = storeById.get(id);
+    const o = overrides[id];
+    store.discount = o && 'discount' in o ? o.discount : b.discount;
+    store.products.length = b.products;
+    if (o?.products) store.products.push(...o.products);
+  }
 }
 
 function storeHaystack(store) {
@@ -126,25 +132,33 @@ function matchStores(q, mallId) {
 }
 
 // ---------- live events (SSE) ----------
+// Events are rows in the db ("user:<id>" | "store:<id>" | "all" channels). Each stream polls for new
+// rows, so an event published on one serverless instance reaches clients connected to another.
+// On Vercel a stream ends before the function time limit; EventSource reconnects with Last-Event-ID.
 
-const channels = new Map(); // "user:<id>" | "store:<id>" | "all" -> Set<res>
+const STREAM_MS = process.env.VERCEL ? 50_000 : Infinity;
 
-function subscribe(key, res) {
-  if (!channels.has(key)) channels.set(key, new Set());
-  channels.get(key).add(res);
-  return () => channels.get(key)?.delete(res);
+async function stream(req, res, channels) {
+  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
+  res.write('retry: 3000\n\n');
+  let open = true;
+  res.on('close', () => { open = false; });
+  let last = Number(req.headers['last-event-id']) || await db.lastEventId();
+  const end = Date.now() + STREAM_MS;
+  let pingAt = Date.now() + 25000;
+  while (open && Date.now() < end) {
+    for (const e of await db.events(channels, last)) {
+      res.write(`id: ${e.id}\nevent: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`);
+      last = e.id;
+    }
+    if (Date.now() > pingAt) {
+      res.write(': ping\n\n');
+      pingAt = Date.now() + 25000;
+    }
+    await sleep(db.pollMs);
+  }
+  res.end();
 }
-
-function emit(key, event, data) {
-  const set = channels.get(key);
-  if (!set) return;
-  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-  for (const res of set) res.write(payload);
-}
-
-setInterval(() => {
-  for (const set of channels.values()) for (const res of set) res.write(': ping\n\n');
-}, 25000);
 
 // ---------- http helpers ----------
 
@@ -177,8 +191,9 @@ function normalizePhone(p) {
   return m ? `0${m[1]}` : null;
 }
 
-function requestView(r) {
-  return { ...r, offers: db.offers.filter((o) => o.requestId === r.id) };
+async function withOffers(list) {
+  const offers = await db.offers(list.map((r) => r.id));
+  return list.map((r) => ({ ...r, offers: offers.filter((o) => o.requestId === r.id) }));
 }
 
 // ---------- routes ----------
@@ -187,6 +202,16 @@ async function api(req, res, url) {
   const parts = url.pathname.split('/').filter(Boolean).slice(1); // drop "api"
   const q = url.searchParams;
   const method = req.method;
+
+  if (method === 'GET' && parts[0] === 'events') {
+    const user = q.get('user');
+    const store = q.get('store');
+    const key = isId(user) ? `user:${user}` : storeById.has(store) ? `store:${store}` : null;
+    if (!key) return send(res, 400, { error: 'کانال نامعتبر' });
+    return stream(req, res, [key, 'all']);
+  }
+
+  await syncOverrides();
 
   if (method === 'GET' && parts[0] === 'malls' && parts.length === 1) {
     return send(res, 200, malls.map(mallSummary));
@@ -211,17 +236,14 @@ async function api(req, res, url) {
       return send(res, 200, { ...ref.store, ...storeSummary(ref) });
     }
     if (method === 'GET' && parts[2] === 'requests') {
-      const list = db.requests
-        .filter((r) => r.matches.some((m) => m.storeId === sid))
-        .map(({ userId, ...r }) => ({
-          ...r,
-          matches: undefined,
-          myProducts: r.matches.find((m) => m.storeId === sid).products
-            .map((pid) => ref.store.products.find((p) => p.id === pid)).filter(Boolean),
-          myOffers: db.offers.filter((o) => o.requestId === r.id && o.storeId === sid),
-        }))
-        .reverse();
-      return send(res, 200, list);
+      const list = await db.storeRequests(sid);
+      const offers = await db.offers(list.map((r) => r.id));
+      return send(res, 200, list.map(({ userId, matches, ...r }) => ({
+        ...r,
+        myProducts: matches.find((m) => m.storeId === sid).products
+          .map((pid) => ref.store.products.find((p) => p.id === pid)).filter(Boolean),
+        myOffers: offers.filter((o) => o.requestId === r.id && o.storeId === sid),
+      })));
     }
     if (method === 'POST' && parts[2] === 'discount') {
       const body = await readBody(req);
@@ -229,9 +251,11 @@ async function api(req, res, url) {
       ref.store.discount = percent > 0 && percent <= 90
         ? { percent, title: clean(body.title, 40) || 'تخفیف ویژه' }
         : null;
-      db.storeOverrides[sid] = { ...db.storeOverrides[sid], discount: ref.store.discount };
-      save();
-      emit('all', 'discount', { mallId: ref.mall.id, storeId: sid, storeName: ref.store.name, discount: ref.store.discount });
+      await db.setDiscount(sid, ref.store.discount);
+      await db.publish([{
+        channel: 'all', event: 'discount',
+        data: { mallId: ref.mall.id, storeId: sid, storeName: ref.store.name, discount: ref.store.discount },
+      }]);
       return send(res, 200, ref.store);
     }
     if (method === 'POST' && parts[2] === 'products') {
@@ -241,9 +265,7 @@ async function api(req, res, url) {
       if (!name || !(price > 0)) return send(res, 400, { error: 'نام و قیمت کالا لازم است' });
       const product = { id: `${sid}-x${Date.now().toString(36)}`, name, price, tags: clean(body.tags, 120), inStock: true };
       ref.store.products.push(product);
-      const o = (db.storeOverrides[sid] ??= {});
-      (o.products ??= []).push(product);
-      save();
+      await db.addProduct(sid, product);
       return send(res, 201, product);
     }
   }
@@ -252,7 +274,7 @@ async function api(req, res, url) {
     if (method === 'GET' && parts.length === 1) {
       const user = q.get('user');
       if (!isId(user)) return send(res, 400, { error: 'شناسه کاربر نامعتبر است' });
-      return send(res, 200, db.requests.filter((r) => r.userId === user).map(requestView).reverse());
+      return send(res, 200, await withOffers(await db.userRequests(user)));
     }
     if (method === 'POST' && parts.length === 1) {
       const body = await readBody(req);
@@ -274,24 +296,27 @@ async function api(req, res, url) {
         status: 'open', createdAt: new Date().toISOString(),
         matches: matchStores(query, mallId),
       };
-      db.requests.push(request);
-      save();
+      await db.addRequest(request);
       const { matches, userId, ...publicReq } = request;
-      for (const m of matches) {
+      await db.publish(matches.map((m) => {
         const store = storeById.get(m.storeId).store;
-        emit(`store:${m.storeId}`, 'request', {
-          ...publicReq,
-          myProducts: m.products.map((pid) => store.products.find((p) => p.id === pid)).filter(Boolean),
-          myOffers: [],
-        });
-      }
+        return {
+          channel: `store:${m.storeId}`, event: 'request',
+          data: {
+            ...publicReq,
+            myProducts: m.products.map((pid) => store.products.find((p) => p.id === pid)).filter(Boolean),
+            myOffers: [],
+          },
+        };
+      }));
       return send(res, 201, {
-        ...requestView(request),
+        ...request,
+        offers: [],
         stores: matches.map((m) => storeSummary(storeById.get(m.storeId))),
       });
     }
 
-    const r = db.requests.find((x) => x.id === parts[1]);
+    const r = await db.getRequest(parts[1]);
     if (!r) return send(res, 404, { error: 'درخواست پیدا نشد' });
 
     if (method === 'POST' && parts[2] === 'offers') {
@@ -307,31 +332,18 @@ async function api(req, res, url) {
         message: clean(body.message, 300),
         store: storeSummary(ref), createdAt: new Date().toISOString(),
       };
-      db.offers.push(offer);
-      save();
-      emit(`user:${r.userId}`, 'offer', { ...offer, query: r.query });
+      await db.addOffer(offer);
+      await db.publish([{ channel: `user:${r.userId}`, event: 'offer', data: { ...offer, query: r.query } }]);
       return send(res, 201, offer);
     }
     if (method === 'POST' && parts[2] === 'close') {
       const body = await readBody(req);
       if (body.userId !== r.userId) return send(res, 403, { error: 'اجازه ندارید' });
+      await db.closeRequest(r.id);
       r.status = 'closed';
-      save();
-      for (const m of r.matches) emit(`store:${m.storeId}`, 'closed', { id: r.id });
-      return send(res, 200, requestView(r));
+      await db.publish(r.matches.map((m) => ({ channel: `store:${m.storeId}`, event: 'closed', data: { id: r.id } })));
+      return send(res, 200, (await withOffers([r]))[0]);
     }
-  }
-
-  if (method === 'GET' && parts[0] === 'events') {
-    const user = q.get('user');
-    const store = q.get('store');
-    const key = isId(user) ? `user:${user}` : storeById.has(store) ? `store:${store}` : null;
-    if (!key) return send(res, 400, { error: 'کانال نامعتبر' });
-    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
-    res.write('retry: 3000\n\n');
-    const offs = [subscribe(key, res), subscribe('all', res)];
-    req.on('close', () => offs.forEach((off) => off()));
-    return;
   }
 
   send(res, 404, { error: 'Not found' });

@@ -5,7 +5,7 @@ GTA-style interactive maps of Tehran shopping malls. Find a mall on the city map
 ## Run
 
 ```bash
-npm start            # or: node server.js   (Node 20+, no dependencies)
+npm start            # or: node server.js   (Node 20+; no install needed locally)
 ```
 
 - Shopper app: http://localhost:3000
@@ -42,7 +42,7 @@ npm start            # or: node server.js   (Node 20+, no dependencies)
 | Mall list, approximate centers | `lib/seed.js` (`MALL_DEFS`). Corrected from OpenStreetMap in the browser |
 | Building outlines | OpenStreetMap, live |
 | Indoor layouts, stores, products, prices, discounts, phone numbers | **Generated sample data** (deterministic per mall). Phone numbers use the fake `021-0000-xxxx` range |
-| Requests, offers, seller edits | `data/db.json` (created on first use) |
+| Requests, offers, seller edits | Neon Postgres when `DATABASE_URL` is set (Vercel), otherwise `data/db.json` (created on first use) |
 
 Real indoor floor plans of Tehran malls aren't public. To use a surveyed plan, put it in `data/layouts/<mallId>.json` as `{ "floors": [...] }`. It replaces the generated layout. Copy the shape from `GET /api/malls/<mallId>`: each floor has `walk`, `stores` (with `door` and `entry`), `voids`, `escalators`, `elevators`, `stairs` and `amenities`, in 1 m grid cells.
 
@@ -52,7 +52,7 @@ To add a mall, append it to `MALL_DEFS` in `lib/seed.js`, with `osm` set to a na
 
 - The seller panel has **no authentication**. Anyone can pick any store. Add real seller accounts (for example SMS OTP) before real use.
 - Shopper identity is a random ID in `localStorage`.
-- `data/db.json` is a single-process JSON store. Move to a real database for production.
+- Without `DATABASE_URL`, `data/db.json` is a single-process JSON store. On Vercel, connect a Neon database (Storage → Neon) so data is shared and persistent; tables are created automatically.
 
 ## API
 
