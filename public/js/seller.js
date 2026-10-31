@@ -1,6 +1,7 @@
 // Seller dashboard: live customer requests, call the customer, send offers, manage discount & products.
 
 import { $, $$, esc, fa, toman, cat, finalPrice, api, toast, timeAgo, store, persist } from './ui.js';
+import { distance, fmtDist } from './geo.js';
 
 let shop = null;
 let requests = [];
@@ -97,7 +98,9 @@ function renderRequests() {
       </div>
       <div class="meta">${timeAgo(r.createdAt)} · ${r.mallName ? 'فقط ' + esc(r.mallName) : 'همه پاساژها'}${r.budget ? ` · بودجه تا ${toman(r.budget)}` : ''}</div>
       ${r.details ? `<div>${esc(r.details)}</div>` : ''}
-      <div class="meta">👤 ${esc(r.name)} · <span dir="ltr">${fa(r.phone)}</span></div>
+      <div class="meta">👤 ${esc(r.name)} · <span dir="ltr">${fa(r.phone)}</span>
+        ${r.location ? ` · 📍 حدود ${fmtDist(distance(r.location, { lat: shop.mallLat, lng: shop.mallLng }))} از پاساژ شما
+          · <a target="_blank" rel="noopener" href="https://www.openstreetmap.org/?mlat=${r.location.lat}&mlon=${r.location.lng}#map=15/${r.location.lat}/${r.location.lng}">نقشه</a>` : ''}</div>
       ${r.myProducts?.length ? `<div class="meta">کالاهای شما: ${r.myProducts.map((p) => `${esc(p.name)} (${toman(finalPrice(p, shop))})`).join('، ')}</div>` : ''}
       <div class="actions-row">
         <a class="btn primary call" href="tel:${esc(r.phone)}">📞 تماس با مشتری</a>

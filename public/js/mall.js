@@ -181,6 +181,9 @@ export class MallEngine {
     this.auto = false;
     this.time = 0;
     this.collected = new Set();
+    this.gps = null; // real position mapped onto the grid by app.js: { x, y, r } in cells
+    this.north = null; // direction of real north on the grid (radians), when the building outline is known
+    this.friends = []; // group members sharing their position in this mall
     this.bindInput();
     this.resize();
     window.addEventListener('resize', () => this.resize());
@@ -195,6 +198,8 @@ export class MallEngine {
     this.highlight.clear();
     this.filter = null;
     this.car = null;
+    this.gps = null;
+    this.north = null;
     const ground = mall.floors.find((f) => f.level === 0) ?? mall.floors[0];
     const entrance = ground.amenities.find((a) => a.type === 'entrance' && a.y > ground.h / 2);
     this.player = {
@@ -227,6 +232,77 @@ export class MallEngine {
   }
 
   stop() { this.running = false; }
+
+  get ground() { return this.mall.floors.find((f) => f.level === 0) ?? this.mall.floors[0]; }
+
+  // Closest cell center the player can stand on, searching outward in rings.
+  nearestOpen(x, y, floorId = this.player.floor, max = 40) {
+    const g = this.grids.get(floorId);
+    const cx = Math.min(g.w - 1, Math.max(0, Math.floor(x))), cy = Math.min(g.h - 1, Math.max(0, Math.floor(y)));
+    for (let r = 0; r <= max; r++) {
+      let best = null, bd = Infinity;
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+          const px = cx + dx + 0.5, py = cy + dy + 0.5;
+          if (!g.canOccupy(px, py) || TRIGGERS.has(g.at(px, py))) continue;
+          const d = Math.hypot(px - x, py - y);
+          if (d < bd) { bd = d; best = { x: px, y: py }; }
+        }
+      }
+      if (best) return best;
+    }
+    return null;
+  }
+
+  // Put the player at (or next to) a point on a floor, e.g. from a GPS fix.
+  moveTo(x, y, floorId = this.player.floor) {
+    const c = this.nearestOpen(x, y, floorId);
+    if (!c) return false;
+    const p = this.player;
+    const changed = floorId !== p.floor;
+    p.floor = floorId;
+    p.x = c.x;
+    p.y = c.y;
+    this.viewFloor = floorId;
+    this.cam.follow = true;
+    if (changed) { this.lastStore = null; this.hooks.onFloorChange?.(this.floor, 'gps'); }
+    this.onCell(true);
+    if (this.waypoint) this.planRoute();
+    return true;
+  }
+
+  // The ground-floor entrance closest to a grid point, as a spawn point just inside the door.
+  entranceNear(x, y) {
+    const f = this.ground;
+    const list = f.amenities.filter((a) => a.type === 'entrance');
+    if (!list.length) return null;
+    const e = list.reduce((a, b) => (Math.hypot(a.x - x, a.y - y) <= Math.hypot(b.x - x, b.y - y) ? a : b));
+    return { floor: f.id, x: e.x, y: e.y < f.h / 2 ? e.y + 1.5 : e.y - 1.5 };
+  }
+
+  // Nearest amenity of a type: same floor by walking distance first, then the closest floor.
+  nearestAmenity(type) {
+    const p = this.player;
+    const cur = this.floor;
+    let best = null;
+    for (const f of this.mall.floors) {
+      for (const a of f.amenities) {
+        if (a.type !== type) continue;
+        const spot = this.nearestOpen(a.x, a.y, f.id, 6);
+        if (!spot) continue;
+        let cost;
+        if (f.id === cur.id) {
+          const path = this.grid.path(p.x, p.y, spot.x, spot.y);
+          cost = path ? path.length : Math.hypot(spot.x - p.x, spot.y - p.y) * 2;
+        } else {
+          cost = 60 * Math.abs(f.level - cur.level) + Math.hypot(spot.x - p.x, spot.y - p.y);
+        }
+        if (!best || cost < best.cost) best = { cost, floor: f.id, x: spot.x, y: spot.y, amenity: a };
+      }
+    }
+    return best;
+  }
 
   get floor() { return this.grids.get(this.player.floor).floor; }
   get grid() { return this.grids.get(this.player.floor); }
@@ -349,6 +425,8 @@ export class MallEngine {
     const grid = this.grids.get(this.viewFloor);
     const store = grid.floor.stores.find((s) => p.x >= s.x && p.x < s.x + s.w && p.y >= s.y && p.y < s.y + s.h);
     if (store) { this.hooks.onStoreClick?.(store); return; }
+    const spot = grid.floor.spots?.find((sp) => p.x >= sp.x && p.x < sp.x + sp.w && p.y >= sp.y && p.y < sp.y + sp.h);
+    if (spot) { this.hooks.onSpotClick?.(spot, grid.floor); return; }
     if (grid.walkable(p.x, p.y)) {
       this.setWaypoint({ floor: this.viewFloor, x: Math.floor(p.x) + 0.5, y: Math.floor(p.y) + 0.5, label: 'مقصد' }, true);
     }
@@ -573,9 +651,23 @@ export class MallEngine {
     if (this.waypoint) this.planRoute();
   }
 
-  parkCar() {
-    this.car = { floor: this.player.floor, x: this.player.x, y: this.player.y };
+  // Park at a numbered spot, or at the player's position (snapped to the nearest spot).
+  parkCar(spot, floorId = this.player.floor) {
+    const f = this.floorById(floorId);
+    if (!spot) {
+      const p = this.player;
+      spot = f.spots?.reduce((a, b) => (Math.hypot(a.x + a.w / 2 - p.x, a.y + a.h / 2 - p.y) <= Math.hypot(b.x + b.w / 2 - p.x, b.y + b.h / 2 - p.y) ? a : b), f.spots[0]);
+    }
+    this.car = spot
+      ? { floor: floorId, x: spot.x + spot.w / 2, y: spot.y + spot.h / 2, spot: spot.label }
+      : { floor: floorId, x: this.player.x, y: this.player.y, spot: null };
     return this.car;
+  }
+
+  routeToCar(auto = false) {
+    if (!this.car) return;
+    const c = this.nearestOpen(this.car.x, this.car.y, this.car.floor, 8) ?? this.car;
+    this.setWaypoint({ floor: this.car.floor, x: c.x, y: c.y, label: `ماشین شما${this.car.spot ? ` · ${this.car.spot}` : ''}` }, auto);
   }
 
   // ---------- rendering ----------
@@ -596,7 +688,9 @@ export class MallEngine {
       this.drawRoute(ctx, cam.s);
       this.drawWaypoint(ctx, cam.s);
     }
-    if (this.car?.floor === floor.id) this.drawBlip(ctx, this.car.x, this.car.y, '🚗', cam.s, 1.1, '#1d6fe0');
+    if (this.car?.floor === floor.id) this.drawCar(ctx, cam.s);
+    this.drawGps(ctx, cam.s);
+    for (const f of this.friends) if (f.floor === floor.id && f.x != null) this.drawFriend(ctx, f, cam.s);
     if (floor.id === this.player.floor) this.drawPlayer(ctx, cam.s);
     ctx.restore();
     this.renderRadar();
@@ -897,6 +991,51 @@ export class MallEngine {
     ctx.restore();
   }
 
+  drawCar(ctx, s) {
+    const c = this.car;
+    const pulse = 0.5 + 0.5 * Math.sin(this.time * 3);
+    ctx.save();
+    ctx.strokeStyle = `rgba(59,143,217,${0.5 + 0.5 * pulse})`;
+    ctx.lineWidth = Math.max(0.15, 2.5 / s);
+    roundRect(ctx, c.x - 1.4, c.y - 2.7, 2.8, 5.4, 0.4);
+    ctx.stroke();
+    ctx.restore();
+    this.drawBlip(ctx, c.x, c.y, '🚗', s, 1.1, '#1d6fe0');
+    if (c.spot) {
+      ctx.fillStyle = '#fff';
+      this.text(ctx, '800', Math.max(0.9, 13 / s), 'center');
+      this.ft(ctx, c.spot, c.x, c.y + Math.max(1.9, 26 / s));
+    }
+  }
+
+  drawFriend(ctx, f, s) {
+    this.drawBlip(ctx, f.x, f.y, f.emoji, s, 1, '#7a2fd0');
+    ctx.fillStyle = '#e9d5ff';
+    this.text(ctx, '800', Math.max(0.8, 12 / s), 'center');
+    this.ft(ctx, f.name, f.x, f.y - Math.max(1.6, 22 / s));
+  }
+
+  // The real GPS fix: blue dot with its accuracy circle (drawn on whichever floor is shown).
+  drawGps(ctx, s) {
+    const g = this.gps;
+    if (!g) return;
+    ctx.beginPath();
+    ctx.arc(g.x, g.y, Math.max(g.r, 0.5), 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(59,143,217,0.14)';
+    ctx.fill();
+    ctx.lineWidth = Math.max(0.05, 1 / s);
+    ctx.strokeStyle = 'rgba(59,143,217,0.6)';
+    ctx.stroke();
+    const r = Math.max(0.45, 7 / s);
+    ctx.beginPath();
+    ctx.arc(g.x, g.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = '#3b8fd9';
+    ctx.fill();
+    ctx.lineWidth = Math.max(0.1, 2.5 / s);
+    ctx.strokeStyle = '#fff';
+    ctx.stroke();
+  }
+
   drawPlayer(ctx, s) {
     const p = this.player;
     const r = Math.max(0.55, 9 / s);
@@ -980,6 +1119,8 @@ export class MallEngine {
     }
     for (const a of f.amenities) if (a.type === 'wc' || a.type === 'elevator') blip(a.x, a.y, '#6fb7ff', 2.5);
     if (this.car?.floor === f.id) blip(this.car.x, this.car.y, '#1d6fe0', 4, true);
+    if (this.gps) blip(this.gps.x, this.gps.y, '#3b8fd9', 3.5, true);
+    for (const fr of this.friends) if (fr.floor === f.id && fr.x != null) blip(fr.x, fr.y, '#b36bff', 4, true);
     if (this.route?.via) { const c = center(this.route.via.conn); blip(c.x, c.y, COLORS.route, 4.5, true); }
     else if (this.waypoint?.floor === f.id) blip(this.waypoint.x, this.waypoint.y, COLORS.route, 4.5, true);
 
@@ -990,9 +1131,17 @@ export class MallEngine {
     ctx.beginPath(); ctx.moveTo(0, -7); ctx.lineTo(5, 5); ctx.lineTo(0, 2.5); ctx.lineTo(-5, 5); ctx.closePath();
     ctx.fillStyle = '#fff'; ctx.fill(); ctx.strokeStyle = '#000'; ctx.lineWidth = 1.2; ctx.stroke();
     ctx.restore();
-    ctx.fillStyle = 'rgba(255,255,255,0.8)';
-    ctx.font = `800 11px ${FONT}`;
+    // North marker on the radar's edge, pointing to real north when the building outline is known.
+    const a = this.north ?? -Math.PI / 2;
+    const k = Math.min((W / 2 - 9) / Math.abs(Math.cos(a) || 1e-9), (H / 2 - 9) / Math.abs(Math.sin(a) || 1e-9));
+    const nx = W / 2 + Math.cos(a) * k, ny = H / 2 + Math.sin(a) * k;
+    ctx.beginPath(); ctx.arc(nx, ny, 7, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.75)'; ctx.fill();
+    ctx.fillStyle = this.north == null ? 'rgba(255,255,255,0.8)' : '#ff6b6b';
+    ctx.font = `800 10px ${FONT}`;
     ctx.textAlign = 'center';
-    ctx.fillText('N', W / 2, 11);
+    ctx.textBaseline = 'middle';
+    ctx.fillText('N', nx, ny + 0.5);
+    ctx.textBaseline = 'alphabetic';
   }
 }

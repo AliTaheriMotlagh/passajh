@@ -1,6 +1,6 @@
 // Small DOM, API and formatting helpers.
 
-import { toFaDigits, formatToman } from '/shared/text.js';
+import { toFaDigits, toLatinDigits, formatToman } from '/shared/text.js';
 import { CATEGORIES } from '/shared/catalog.js';
 
 export const $ = (sel, root = document) => root.querySelector(sel);
@@ -66,6 +66,38 @@ export function timeAgo(iso) {
 export function debounce(fn, ms) {
   let t;
   return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+}
+
+// Open / closed right now in Tehran, from hours like "۱۰:۰۰ تا ۲۲:۰۰".
+export function openStatus(hours) {
+  const m = toLatinDigits(hours).match(/(\d{1,2}):(\d{2})\D+(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  const [o, c] = [+m[1] * 60 + +m[2], +m[3] * 60 + +m[4]];
+  const [hh, mm] = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'Asia/Tehran' }).split(':');
+  const now = +hh * 60 + +mm;
+  const open = c > o ? now >= o && now < c : now >= o || now < c;
+  if (!open) return { open, text: `بسته · از ${fa(m[1].padStart(2, '0'))}:${fa(m[2])}` };
+  const left = (c - now + 1440) % 1440;
+  return { open, text: left <= 60 ? `${fa(left)} دقیقه تا تعطیلی` : `باز است · تا ${fa(m[3].padStart(2, '0'))}:${fa(m[4])}` };
+}
+
+// System notification when the page is in the background (Android only allows them through the service worker).
+export async function notify(title, body, tag) {
+  if (!document.hidden || window.Notification?.permission !== 'granted') return;
+  const opts = { body, tag, icon: '/icon.svg', badge: '/icon.svg', lang: 'fa', dir: 'rtl' };
+  try {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    if (reg) return reg.showNotification(title, opts);
+    new Notification(title, opts);
+  } catch { /* notifications unavailable */ }
+}
+
+export function askNotifications() {
+  if (window.Notification?.permission === 'default') Notification.requestPermission().catch(() => {});
+}
+
+export function vibrate(p) {
+  try { navigator.vibrate?.(p); } catch { /* not supported */ }
 }
 
 export function store(key, fallback) {

@@ -6,9 +6,9 @@ import { stat } from 'node:fs/promises';
 import { existsSync, readFileSync, createReadStream } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { buildMalls } from './lib/seed.js';
+import { buildMalls, buildMall, discoveredDef, MALL_DEFS } from './lib/seed.js';
 import { openDb } from './lib/db.js';
 import { CATEGORIES } from './public/shared/catalog.js';
 import { tokens, matchScore, toLatinDigits } from './public/shared/text.js';
@@ -30,30 +30,45 @@ const MIME = {
 
 const db = await openDb({ dir: DATA });
 
-const malls = buildMalls();
-for (const mall of malls) {
+const malls = [];
+const mallById = new Map();
+const storeById = new Map(); // id -> { store, mall, floor }
+// Seed discount and product count per store, so seller edits can be re-applied from scratch.
+const base = new Map();
+
+function register(mall) {
+  if (mallById.has(mall.id)) return;
   // A surveyed floor plan in data/layouts/<mallId>.json replaces the generated one.
   const file = path.join(LAYOUTS, `${mall.id}.json`);
   if (existsSync(file)) mall.floors = JSON.parse(readFileSync(file, 'utf8')).floors;
-}
-
-const mallById = new Map(malls.map((m) => [m.id, m]));
-const storeById = new Map(); // id -> { store, mall, floor }
-for (const mall of malls) {
+  malls.push(mall);
+  mallById.set(mall.id, mall);
   for (const floor of mall.floors) {
-    for (const store of floor.stores) storeById.set(store.id, { store, mall, floor });
+    for (const store of floor.stores) {
+      storeById.set(store.id, { store, mall, floor });
+      base.set(store.id, { discount: store.discount, products: store.products.length });
+    }
   }
 }
-// Seed discount and product count per store, so seller edits can be re-applied from scratch.
-const base = new Map();
-for (const { store } of storeById.values()) base.set(store.id, { discount: store.discount, products: store.products.length });
+for (const mall of buildMalls()) register(mall);
+
+// Malls found on OpenStreetMap (by any instance) are kept in the db and rebuilt here.
+let discoveredCount = 0;
+async function syncDiscovered() {
+  const defs = await db.discovered(discoveredCount);
+  discoveredCount += defs.length;
+  for (const def of defs) register(buildMall(def));
+  return defs.length;
+}
+await syncDiscovered();
 
 // Seller edits can be made on another server instance, so re-read them from the db every few seconds.
 let syncedAt = 0;
 async function syncOverrides() {
   if (Date.now() - syncedAt < 3000) return;
-  const overrides = await db.overrides();
   syncedAt = Date.now();
+  await syncDiscovered();
+  const overrides = await db.overrides();
   for (const [id, b] of base) {
     const { store } = storeById.get(id);
     const o = overrides[id];
@@ -61,6 +76,117 @@ async function syncOverrides() {
     store.products.length = b.products;
     if (o?.products) store.products.push(...o.products);
   }
+}
+
+// ---------- malls anywhere in Iran (OpenStreetMap) ----------
+
+const OVERPASS = process.env.OVERPASS_URL ? [process.env.OVERPASS_URL]
+  : ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter'];
+const IRAN = { s: 25, w: 44, n: 40, e: 63.5 };
+const inIran = (lat, lng) => lat > IRAN.s && lat < IRAN.n && lng > IRAN.w && lng < IRAN.e;
+const SEEDED = MALL_DEFS.map((d) => ({ ...d, re: new RegExp(d.osm, 'i') }));
+const jobs = new Map(); // in-flight OpenStreetMap lookups, so concurrent callers share one
+
+function once(key, fn) {
+  if (!jobs.has(key)) {
+    const job = fn();
+    job.catch(() => {}).finally(() => jobs.delete(key));
+    jobs.set(key, job);
+  }
+  return jobs.get(key);
+}
+
+function haversine(a, b) {
+  const rad = Math.PI / 180;
+  const h = Math.sin(((b.lat - a.lat) * rad) / 2) ** 2
+    + Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(((b.lng - a.lng) * rad) / 2) ** 2;
+  return 12742000 * Math.asin(Math.sqrt(h));
+}
+
+// Overpass is often unreachable from inside Iran, so the server asks on the browser's behalf.
+async function overpass(q) {
+  for (const url of OVERPASS) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST', body: `data=${encodeURIComponent(q)}`, signal: AbortSignal.timeout(30000),
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'passajh/0.2' },
+      });
+      if (res.ok) return await res.json();
+    } catch { /* try the next mirror */ }
+  }
+  throw Object.assign(new Error('OpenStreetMap در دسترس نیست، کمی بعد دوباره تلاش کنید'), { status: 503 });
+}
+
+// Outline rings ([lat, lng]) and center of an OSM element, thinned to at most ~120 points per ring.
+function shape(el) {
+  const ways = el.type === 'way' ? [el.geometry] : el.type === 'relation'
+    ? (el.members || []).filter((x) => x.role !== 'inner' && x.geometry).map((x) => x.geometry) : [];
+  const rings = ways.filter((g) => g?.length >= 3).slice(0, 4).map((g) => {
+    const step = Math.ceil(g.length / 120);
+    return g.filter((_, i) => i % step === 0).map((q) => [+q.lat.toFixed(6), +q.lon.toFixed(6)]);
+  });
+  const pts = rings.flat();
+  const lat = pts.length ? pts.reduce((a, q) => a + q[0], 0) / pts.length : el.lat ?? el.center?.lat;
+  const lng = pts.length ? pts.reduce((a, q) => a + q[1], 0) / pts.length : el.lon ?? el.center?.lon;
+  return { rings, lat, lng };
+}
+
+// Register the shopping malls in the 3×3 block of 0.1° tiles (≈ 30 km) around a point.
+// Each tile is fetched from OpenStreetMap once, ever; later calls read the db.
+function discoverAround(lat, lng) {
+  const ty = Math.floor(lat * 10), tx = Math.floor(lng * 10);
+  return once(`tiles:${ty}:${tx}`, async () => {
+    const tiles = [];
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) tiles.push(`${ty + dy}:${tx + dx}`);
+    if (!(await db.missingTiles(tiles)).length) return syncDiscovered();
+    const bbox = `${(ty - 1) / 10},${(tx - 1) / 10},${(ty + 2) / 10},${(tx + 2) / 10}`;
+    const data = await overpass(`[out:json][timeout:25];(
+      nwr["shop"="mall"]["name"](${bbox});
+      nwr["amenity"="marketplace"]["name"]["building"](${bbox});
+    );out geom;`);
+    const defs = [];
+    for (const el of data.elements || []) {
+      const t = el.tags || {};
+      const name = (t['name:fa'] || t.name || '').trim().slice(0, 80);
+      if (!name) continue;
+      const { rings, lat: clat, lng: clng } = shape(el);
+      if (!inIran(clat, clng)) continue;
+      // Skip the hand-made Tehran malls; they already have curated data.
+      if (SEEDED.some((d) => d.re.test(name) && haversine(d, { lat: clat, lng: clng }) < 3000)) continue;
+      defs.push(discoveredDef({
+        id: `osm-${el.type[0]}${el.id}`, name, nameEn: t['name:en'], lat: clat, lng: clng, rings,
+        levels: t['building:levels'], city: t['addr:city'],
+      }));
+    }
+    await db.addDiscovered(defs, tiles);
+    return syncDiscovered();
+  });
+}
+
+// Real building outline of a curated mall, matched by name near its approximate center.
+async function footprintOf(mall) {
+  const cached = await db.footprint(mall.id);
+  if (cached) return cached;
+  return once(`fp:${mall.id}`, async () => {
+    const names = (mall.osm || `${mall.name}|${mall.nameEn}`).replace(/"/g, '');
+    const around = `around:2500,${mall.lat},${mall.lng}`;
+    const data = await overpass(`[out:json][timeout:25];(
+      nwr(${around})["shop"="mall"]["name"~"${names}",i];
+      nwr(${around})["shop"="mall"]["name:en"~"${names}",i];
+      nwr(${around})["name"~"${names}",i]["building"~"retail|commercial|yes"];
+      nwr(${around})["amenity"="marketplace"]["name"~"${names}",i];
+    );out geom 8;`);
+    let best = null;
+    for (const el of data.elements || []) {
+      const sh = shape(el);
+      if (sh.lat == null) continue;
+      const d = haversine(sh, mall) + (sh.rings.length ? 0 : 200);
+      if (d < 8000 && (!best || d < best.d)) best = { d, ...sh };
+    }
+    const fp = best ? { lat: best.lat, lng: best.lng, rings: best.rings } : { none: true };
+    await db.setFootprint(mall.id, fp);
+    return fp;
+  });
 }
 
 function storeHaystack(store) {
@@ -89,6 +215,7 @@ function mallSummary(m) {
   }
   return {
     id: m.id, name: m.name, nameEn: m.nameEn, lat: m.lat, lng: m.lng, osm: m.osm,
+    rings: m.rings, discovered: !!m.discovered,
     address: m.address, description: m.description, hours: m.hours,
     floors: m.floors.map((f) => ({ id: f.id, name: f.name, type: f.type })),
     stores, discounts, products, categories,
@@ -114,11 +241,11 @@ function searchProducts(q, { mallId, limit = 40, threshold = 1 } = {}) {
 
 // Stores that should be notified about a request: those holding a matching product
 // (or whose category matches the query).
-function matchStores(q, mallId) {
+function matchStores(q, mallIds) {
   const qt = tokens(q);
   const result = new Map();
   for (const ref of storeById.values()) {
-    if (mallId && ref.mall.id !== mallId) continue;
+    if (mallIds && !mallIds.has(ref.mall.id)) continue;
     let best = matchScore(qt, storeHaystack(ref.store)) >= 1 ? 0.9 : 0;
     const products = [];
     for (const p of ref.store.products) {
@@ -162,8 +289,26 @@ async function stream(req, res, channels) {
 
 // ---------- http helpers ----------
 
+const SECURITY = {
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'strict-origin-when-cross-origin',
+  'Permissions-Policy': 'geolocation=(self), camera=(self), microphone=()',
+  'X-Frame-Options': 'SAMEORIGIN',
+};
+
+// Per-IP budget for writes (requests, offers, presence), so one client can't spam stores.
+const hits = new Map();
+function rateLimited(req, limit = 60) {
+  const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+  const now = Date.now();
+  const h = hits.get(ip);
+  if (!h || now - h.start > 60_000) { hits.set(ip, { start: now, n: 1 }); return false; }
+  if (hits.size > 10_000) hits.clear();
+  return ++h.n > limit;
+}
+
 function send(res, status, body) {
-  res.writeHead(status, { 'Content-Type': MIME['.json'], 'Cache-Control': 'no-store' });
+  res.writeHead(status, { ...SECURITY, 'Content-Type': MIME['.json'], 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(body));
 }
 
@@ -184,6 +329,17 @@ async function readBody(req) {
 
 const clean = (s, max) => String(s ?? '').trim().slice(0, max);
 const isId = (s) => typeof s === 'string' && /^[\w-]{6,64}$/.test(s);
+const isGroup = (s) => typeof s === 'string' && /^[A-Z0-9]{6}$/.test(s);
+const num = (v, min, max) => (typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max ? v : null);
+// Public id for a member of a friends group, so the private user id (which authorizes requests) never leaks.
+const publicId = (userId) => createHash('sha256').update(`passajh:${userId}`).digest('hex').slice(0, 16);
+const PRESENCE_MS = 2 * 60 * 1000;
+
+// A point the user chose to share, rounded to about 100 m.
+function roughPoint(p) {
+  const lat = num(p?.lat, IRAN.s, IRAN.n), lng = num(p?.lng, IRAN.w, IRAN.e);
+  return lat && lng ? { lat: Math.round(lat * 1000) / 1000, lng: Math.round(lng * 1000) / 1000 } : null;
+}
 
 function normalizePhone(p) {
   const d = toLatinDigits(p).replace(/[\s-]/g, '');
@@ -202,6 +358,9 @@ async function api(req, res, url) {
   const parts = url.pathname.split('/').filter(Boolean).slice(1); // drop "api"
   const q = url.searchParams;
   const method = req.method;
+  if (method === 'POST' && rateLimited(req, parts[0] === 'presence' ? 120 : 30)) {
+    return send(res, 429, { error: 'درخواست‌ها زیاد است؛ یک دقیقه دیگر تلاش کنید' });
+  }
 
   if (method === 'GET' && parts[0] === 'events') {
     const user = q.get('user');
@@ -215,6 +374,43 @@ async function api(req, res, url) {
 
   if (method === 'GET' && parts[0] === 'malls' && parts.length === 1) {
     return send(res, 200, malls.map(mallSummary));
+  }
+  // Malls around a point anywhere in Iran, fetched from OpenStreetMap once per area.
+  if (method === 'GET' && parts[0] === 'discover') {
+    const lat = Number(q.get('lat')), lng = Number(q.get('lng'));
+    if (!inIran(lat, lng)) return send(res, 400, { error: 'این نقطه داخل ایران نیست' });
+    let partial = false;
+    await discoverAround(lat, lng).catch(() => { partial = true; });
+    const near = malls.filter((m) => m.discovered && Math.abs(m.lat - lat) < 0.2 && Math.abs(m.lng - lng) < 0.2);
+    return send(res, 200, { malls: near.map(mallSummary), partial });
+  }
+  if (method === 'GET' && parts[0] === 'footprint' && mallById.has(parts[1])) {
+    const m = mallById.get(parts[1]);
+    if (m.discovered) return send(res, 200, { lat: m.lat, lng: m.lng, rings: m.rings });
+    return send(res, 200, await footprintOf(m));
+  }
+  // Friends group: members who turned on location sharing.
+  if (parts[0] === 'presence' && method === 'POST') {
+    const body = await readBody(req);
+    if (!isId(body.userId) || !isGroup(body.group)) return send(res, 400, { error: 'گروه نامعتبر است' });
+    if (body.sharing === false) {
+      await db.setPresence(body.userId, body.group, null);
+      return send(res, 200, { ok: true });
+    }
+    const lat = num(body.lat, IRAN.s, IRAN.n), lng = num(body.lng, IRAN.w, IRAN.e);
+    const mall = mallById.get(body.mallId);
+    const floor = mall?.floors.find((f) => f.id === body.floor);
+    await db.setPresence(body.userId, body.group, {
+      id: publicId(body.userId), name: clean(body.name, 30) || 'دوست', emoji: clean(body.emoji, 4) || '🙂',
+      lat, lng, accuracy: num(body.accuracy, 0, 5000),
+      mallId: mall?.id ?? null, mallName: mall?.name ?? null,
+      floor: floor?.id ?? null, floorName: floor?.name ?? null,
+      x: floor ? num(body.x, 0, floor.w) : null, y: floor ? num(body.y, 0, floor.h) : null,
+    });
+    return send(res, 200, { ok: true, id: publicId(body.userId) });
+  }
+  if (parts[0] === 'groups' && method === 'GET' && isGroup(parts[1])) {
+    return send(res, 200, await db.groupPresence(parts[1], PRESENCE_MS));
   }
   if (method === 'GET' && parts[0] === 'malls' && parts.length === 2) {
     const m = mallById.get(parts[1]);
@@ -233,7 +429,7 @@ async function api(req, res, url) {
     const sid = ref.store.id;
 
     if (method === 'GET' && parts.length === 2) {
-      return send(res, 200, { ...ref.store, ...storeSummary(ref) });
+      return send(res, 200, { ...ref.store, ...storeSummary(ref), mallLat: ref.mall.lat, mallLng: ref.mall.lng });
     }
     if (method === 'GET' && parts[2] === 'requests') {
       const list = await db.storeRequests(sid);
@@ -282,6 +478,9 @@ async function api(req, res, url) {
       const phone = normalizePhone(body.phone);
       const name = clean(body.name, 40);
       const mallId = body.mallId && mallById.has(body.mallId) ? body.mallId : null;
+      // "Near me": the client sends the malls within the chosen radius (it knows their corrected positions).
+      const nearIds = Array.isArray(body.mallIds) ? body.mallIds.filter((id) => mallById.has(id)).slice(0, 80) : null;
+      const scope = mallId ? new Set([mallId]) : nearIds?.length ? new Set(nearIds) : null;
       if (!isId(body.userId)) return send(res, 400, { error: 'شناسه کاربر نامعتبر است' });
       if (query.length < 2) return send(res, 400, { error: 'نام کالا را وارد کنید' });
       if (!phone) return send(res, 400, { error: 'شماره موبایل معتبر نیست (مثلاً ۰۹۱۲۱۲۳۴۵۶۷)' });
@@ -292,9 +491,10 @@ async function api(req, res, url) {
         id: randomUUID(), userId: body.userId, name, phone, query,
         details: clean(body.details, 300),
         budget: Math.round(Number(toLatinDigits(body.budget ?? '').replace(/[^\d]/g, ''))) || null,
-        mallId, mallName: mallId ? mallById.get(mallId).name : null,
+        mallId, mallName: mallId ? mallById.get(mallId).name : nearIds?.length ? `${nearIds.length} پاساژ نزدیک` : null,
+        location: body.shareLocation === true ? roughPoint(body.location) : null,
         status: 'open', createdAt: new Date().toISOString(),
-        matches: matchStores(query, mallId),
+        matches: matchStores(query, scope),
       };
       await db.addRequest(request);
       const { matches, userId, ...publicReq } = request;
@@ -358,7 +558,7 @@ async function serveStatic(req, res, url) {
   try {
     const st = await stat(file);
     if (!st.isFile()) throw new Error('not a file');
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
+    res.writeHead(200, { ...SECURITY, 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
     createReadStream(file).pipe(res);
   } catch {
     send(res, 404, { error: 'Not found' });

@@ -4,7 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="theme-color" content="#0b1118">
-  <title>پاساژ — نقشه مراکز خرید تهران</title>
+  <meta name="description" content="نقشه زنده مراکز خرید ایران: مسیریابی، نقشه داخلی طبقات، تخفیف‌ها، پارکینگ و درخواست کالا">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="پاساژ">
+  <meta name="format-detection" content="telephone=no">
+  <title>پاساژ — نقشه مراکز خرید ایران</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon-180.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;600;700;800;900&display=swap">
@@ -12,59 +21,74 @@
   <link rel="stylesheet" href="/css/app.css">
 </head>
 <body>
+  <div id="splash" class="splash" aria-hidden="true"><div class="splash-logo">پاساژ<small>PASSAJH</small></div></div>
+
   <!-- City view -->
   <section id="city-view" class="view">
     <div id="city-map"></div>
     <header class="topbar">
-      <div class="brand">پاساژ<small>PASSAJH · TEHRAN</small></div>
+      <div class="brand">پاساژ<small>PASSAJH · IRAN</small></div>
       <div class="search">
-        <input id="city-search" type="search" autocomplete="off" placeholder="دنبال چه کالایی هستی؟ آیفون، مانتو، زعفران…">
+        <input id="city-search" type="search" autocomplete="off" enterkeyhint="search" placeholder="دنبال چه کالایی هستی؟ آیفون، مانتو، زعفران…" aria-label="جستجوی کالا">
         <div id="city-results" class="results hidden"></div>
       </div>
-      <button class="btn primary" data-action="request">📣 درخواست کالا</button>
-      <button class="btn" data-action="myreq">📬 <span class="hide-sm">درخواست‌های من</span> <b class="badge hidden"></b></button>
+      <button class="btn primary" data-action="request">📣 <span class="hide-sm">درخواست کالا</span></button>
+      <button class="btn icon-lg" data-action="hub" aria-label="منوی من">☰<b class="badge hidden" data-count="offers"></b></button>
     </header>
-    <aside id="mall-list" class="panel"></aside>
+    <div class="share-indicator hidden" data-action="friends">📡 موقعیت شما برای گروه نمایش داده می‌شود</div>
+    <div id="discover-chip" class="discover-chip hidden"><span class="spinner"></span> جستجوی مراکز خرید این منطقه…</div>
+    <div id="nav-panel" class="nav-panel hidden" aria-live="polite"></div>
+    <aside id="mall-list" class="panel sheet"></aside>
     <div id="mall-card" class="panel hidden"></div>
-    <button id="btn-locate" class="fab" title="موقعیت من">◎</button>
+    <div class="fabs">
+      <button id="btn-park" class="fab" title="ماشینم را اینجا پارک کردم" aria-label="پارک ماشین">🚗</button>
+      <button id="btn-locate" class="fab" title="موقعیت من" aria-label="موقعیت من"><span class="locate-ico"></span></button>
+    </div>
   </section>
 
   <!-- Mall view -->
   <section id="mall-view" class="view hidden">
-    <canvas id="mall-canvas"></canvas>
+    <canvas id="mall-canvas" aria-label="نقشه داخلی پاساژ"></canvas>
     <header class="topbar">
-      <button class="btn" id="btn-back" title="بازگشت به نقشه شهر">→ شهر</button>
+      <button class="btn icon-lg" id="btn-back" title="بازگشت به نقشه شهر" aria-label="بازگشت">→</button>
       <div class="brand mall-title" id="mall-title"></div>
       <div class="search">
-        <input id="mall-search" type="search" autocomplete="off" placeholder="جستجوی کالا یا فروشگاه در این پاساژ…">
+        <input id="mall-search" type="search" autocomplete="off" enterkeyhint="search" placeholder="جستجوی کالا یا فروشگاه در این پاساژ…" aria-label="جستجو در پاساژ">
         <div id="mall-results" class="results hidden"></div>
       </div>
-      <button class="btn" id="btn-discounts">🏷️ <span class="hide-sm">تخفیف‌ها</span></button>
-      <button class="btn" id="btn-legend">🗺️ <span class="hide-sm">راهنما</span></button>
-      <button class="btn primary" data-action="request">📣 <span class="hide-sm">درخواست کالا</span></button>
-      <button class="btn" data-action="myreq">📬 <b class="badge hidden"></b></button>
+      <button class="btn" id="btn-discounts" aria-label="تخفیف‌ها">🏷️ <span class="hide-sm">تخفیف‌ها</span></button>
+      <button class="btn hide-sm" id="btn-legend">🗺️ راهنما</button>
+      <button class="btn primary hide-sm" data-action="request">📣 درخواست کالا</button>
+      <button class="btn icon-lg" data-action="hub" aria-label="منوی من">☰<b class="badge hidden" data-count="offers"></b></button>
     </header>
+    <nav id="quick-bar" class="quick-bar" aria-label="امکانات نزدیک"></nav>
+    <div class="share-indicator hidden" data-action="friends">📡 موقعیت شما برای گروه نمایش داده می‌شود</div>
 
-    <div id="hud-money" class="hud-money"></div>
-    <div id="help-box" class="help-box hidden"></div>
-    <div id="route-hint" class="route-hint hidden"></div>
+    <div class="hud">
+      <div id="hud-money" class="hud-money"></div>
+      <button id="park-chip" class="park-chip hidden" data-action="parking"></button>
+    </div>
+    <div id="help-box" class="help-box hidden" role="status"></div>
+    <div id="route-hint" class="route-hint hidden" aria-live="polite"></div>
 
-    <nav id="floor-picker" class="floor-picker"></nav>
+    <nav id="floor-picker" class="floor-picker" aria-label="طبقات"></nav>
 
     <div class="radar-wrap">
-      <canvas id="radar"></canvas>
+      <canvas id="radar" aria-hidden="true"></canvas>
       <div id="location-text" class="location-text"></div>
     </div>
 
     <div class="map-tools">
-      <button class="tool" id="btn-zoom-in" title="بزرگنمایی">+</button>
-      <button class="tool" id="btn-zoom-out" title="کوچک‌نمایی">−</button>
-      <button class="tool" id="btn-full" title="نقشه کامل طبقه (M)">⛶</button>
-      <button class="tool" id="btn-center" title="مرکز روی من">◎</button>
-      <button class="tool" id="btn-car" title="ماشینم اینجاست">🚗</button>
+      <button class="tool" id="btn-gps" title="موقعیت واقعی من" aria-label="موقعیت واقعی من">📡</button>
+      <button class="tool" id="btn-center" title="مرکز روی من" aria-label="مرکز روی من">◎</button>
+      <button class="tool" id="btn-car" title="ماشین من" aria-label="ماشین من">🚗</button>
+      <button class="tool" id="btn-zoom-in" title="بزرگنمایی" aria-label="بزرگنمایی">+</button>
+      <button class="tool" id="btn-zoom-out" title="کوچک‌نمایی" aria-label="کوچک‌نمایی">−</button>
+      <button class="tool" id="btn-full" title="نقشه کامل طبقه (M)" aria-label="نقشه کامل">⛶</button>
+      <button class="tool show-sm" onclick="document.getElementById('btn-legend').click()" aria-label="راهنمای نقشه">🗺️</button>
     </div>
 
-    <div id="joystick" class="joystick"><div class="stick"></div></div>
+    <div id="joystick" class="joystick" aria-hidden="true"><div class="stick"></div></div>
     <div class="controls-hint hide-sm">WASD / ← ↑ → ↓ حرکت · Shift دویدن · کلیک روی راهرو: برو آنجا · کلیک روی مغازه: محصولات · M نقشه کامل</div>
 
     <aside id="store-panel" class="drawer hidden"></aside>
@@ -74,9 +98,14 @@
   </section>
 
   <!-- Shared -->
-  <div id="modal" class="modal hidden"><div class="modal-box" id="modal-box"></div></div>
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true"><div class="modal-box" id="modal-box"></div></div>
   <aside id="myreq-panel" class="drawer hidden"></aside>
-  <div id="toasts" class="toasts"></div>
+  <aside id="hub-panel" class="drawer hidden"></aside>
+  <aside id="list-panel" class="drawer hidden"></aside>
+  <aside id="favs-panel" class="drawer hidden"></aside>
+  <aside id="friends-panel" class="drawer hidden"></aside>
+  <aside id="parking-panel" class="drawer hidden"></aside>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script type="module" src="/js/app.js"></script>
