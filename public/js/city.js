@@ -48,8 +48,8 @@ export class CityView {
     this.renderList();
     // Start where the user was last time if that's away from the Tehran malls; otherwise show Tehran.
     const last = geo.best;
-    if (last && !this.malls.some((m) => distance(last, m) < 30000)) map.setView([last.lat, last.lng], 13);
-    else map.fitBounds(L.latLngBounds(this.malls.map((m) => [m.lat, m.lng])).pad(0.15));
+    if (last && !this.malls.some((m) => !m.discovered && distance(last, m) < 30000)) map.setView([last.lat, last.lng], 13);
+    else map.fitBounds(L.latLngBounds(this.malls.filter((m) => !m.discovered).map((m) => [m.lat, m.lng])).pad(0.15));
     if (this.car) this.drawCar();
 
     $('#btn-locate').addEventListener('click', () => this.locate());

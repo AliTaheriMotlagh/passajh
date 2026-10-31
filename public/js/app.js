@@ -30,6 +30,7 @@ city.onFriend = (f) => {
 
 async function route() {
   const [, view, id, storeId] = location.hash.split('/');
+  closeModal();
   if (view === 'join' && id) {
     joinGroup(id);
     history.replaceState(null, '', '#/');

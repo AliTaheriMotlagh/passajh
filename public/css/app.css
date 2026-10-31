@@ -7,7 +7,7 @@
   /* Color */
   --bg: #0b1118;
   --surface-1: rgba(12, 17, 24, 0.9);
-  --surface-sheet: rgba(14, 20, 28, 0.97);
+  --surface-sheet: #111922;
   --surface-2: #121b25;
   --surface-3: #1a2531;
   --surface-hover: rgba(255, 255, 255, 0.07);
@@ -392,7 +392,7 @@ a { color: #8cc4ff; }
   background: rgba(255, 255, 255, 0.35); border: 2px solid rgba(255, 255, 255, 0.6); box-shadow: var(--e1);
 }
 .joystick:not(.active) .stick { transition: transform var(--d2) var(--ease-spring); }
-@media (pointer: coarse) { .joystick { display: block; } }
+@media (pointer: coarse) { .joystick { display: block; } .tool.zoom { display: none; } }
 
 .fade { position: absolute; inset: 0; z-index: 40; background: #000; opacity: 0; pointer-events: none; transition: opacity 0.25s; display: grid; place-items: center; font-weight: 900; font-size: 26px; }
 .fade.on { opacity: 1; }
@@ -480,7 +480,8 @@ a { color: #8cc4ff; }
 .li-check { display: flex; align-items: center; gap: 10px; margin: 0; color: var(--text); font-size: var(--fs-md); flex: 1; min-width: 140px; min-height: 40px; cursor: pointer; }
 .li-check input { width: 22px; height: 22px; accent-color: var(--brand); flex: none; }
 .li.done .li-check span { text-decoration: line-through; color: var(--text-3); }
-.li-where { border: 0; background: rgba(176, 92, 255, 0.12); color: #d9b8ff; border-radius: var(--r-pill); padding: 4px 10px; font-size: 12px; cursor: pointer; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.li .icon-btn { order: 2; }
+.li-where { order: 3; margin-inline-start: 32px; border: 0; background: rgba(176, 92, 255, 0.12); color: #d9b8ff; border-radius: var(--r-pill); padding: 4px 10px; font-size: 12px; cursor: pointer; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .li-where.none { background: none; color: var(--text-3); cursor: default; }
 .meter { width: 60px; height: 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.1); overflow: hidden; flex: none; }
 .meter i { display: block; height: 100%; background: var(--brand); border-radius: 3px; transition: width var(--d3) var(--ease-out); }
@@ -619,7 +620,7 @@ select option { background: var(--surface-2); }
   #radar { width: 150px; height: 110px; }
   .radar-wrap { bottom: calc(12px + var(--sab)); inset-inline-start: calc(10px + var(--sar)); }
   .location-text { font-size: 12px; max-width: 170px; }
-  .map-tools { inset-inline-start: auto; inset-inline-end: calc(10px + var(--sal)); bottom: auto; top: calc(150px + var(--sat)); flex-direction: row; flex-wrap: wrap; justify-content: flex-end; max-width: 200px; gap: 4px; }
+  .map-tools { inset-inline-start: auto; inset-inline-end: calc(10px + var(--sal)); bottom: auto; top: calc(150px + var(--sat)); gap: 6px; }
   .tool { width: 40px; height: 40px; font-size: 16px; }
   .floor-picker { top: auto; bottom: calc(170px + var(--sab)); transform: none; inset-inline-start: calc(10px + var(--sar)); inset-inline-end: auto; max-height: 34vh; }
   .floor-picker button { width: 46px; height: 36px; }
