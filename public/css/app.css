@@ -109,7 +109,7 @@ a { color: #8cc4ff; }
 
 /* Leaflet GTA styling */
 .leaflet-container { background: #0b1118; font-family: inherit; }
-.gta-tiles { filter: hue-rotate(185deg) saturate(1.6) brightness(1.05) contrast(1.05); }
+.gta-tiles { filter: invert(1) hue-rotate(195deg) saturate(1.4) brightness(0.85) contrast(1.15); }
 .leaflet-control-attribution { background: rgba(0, 0, 0, 0.6) !important; color: #789 !important; font-size: 10px; }
 .leaflet-control-attribution a { color: #9ab !important; }
 .leaflet-control-layers, .leaflet-bar a { background: var(--panel-solid) !important; color: var(--text) !important; border-color: var(--line) !important; }

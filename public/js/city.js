@@ -17,9 +17,9 @@ export class CityView {
 
   async init() {
     const map = (this.map = L.map('city-map', { zoomControl: false, attributionControl: true }).setView(TEHRAN, 12));
-    const gta = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      maxZoom: 20, subdomains: 'abcd', className: 'gta-tiles',
-      attribution: '&copy; OpenStreetMap &copy; CARTO',
+    // The dark "GTA" look is the standard OSM layer recolored in CSS (.gta-tiles); CARTO's dark tiles now need an API key.
+    const gta = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19, className: 'gta-tiles', attribution: '&copy; OpenStreetMap',
     }).addTo(map);
     const streets = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' });
     const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
