@@ -100,7 +100,10 @@ a { color: #8cc4ff; }
 .stat span { font-size: 11px; color: var(--muted); }
 .coords { font-size: 12px; color: var(--muted); direction: ltr; text-align: right; font-family: ui-monospace, monospace; }
 .card-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
-.close-x { position: absolute; top: 10px; inset-inline-end: 10px; background: none; border: 0; font-size: 20px; cursor: pointer; color: var(--muted); }
+.close-x {
+  position: absolute; top: 6px; inset-inline-end: 6px; background: none; border: 0; font-size: 20px; cursor: pointer; color: var(--muted);
+  min-width: 44px; min-height: 44px; display: grid; place-items: center;
+}
 
 .fab {
   position: absolute; z-index: 900; bottom: 24px; inset-inline-start: 356px; width: 46px; height: 46px;
@@ -215,7 +218,7 @@ a { color: #8cc4ff; }
   background: var(--panel); backdrop-filter: blur(12px); border: 1px solid var(--line); border-radius: 14px;
   overflow: auto; padding: 16px; box-shadow: 0 10px 50px rgba(0, 0, 0, 0.6); animation: slidein 0.2s ease-out;
 }
-.drawer h2 { margin: 0 0 4px; font-size: 21px; font-weight: 900; padding-inline-end: 28px; }
+.drawer h2 { margin: 0 0 4px; font-size: 21px; font-weight: 900; padding-inline-end: 40px; }
 .drawer h3 { font-size: 14px; color: var(--muted); margin: 18px 0 8px; }
 .drawer .sub { color: var(--muted); font-size: 13px; }
 @keyframes slidein { from { opacity: 0; transform: translateY(8px); } }
@@ -254,23 +257,31 @@ a { color: #8cc4ff; }
 /* ---------- modal & forms ---------- */
 .modal { position: fixed; inset: 0; z-index: 2000; background: rgba(0, 0, 0, 0.6); display: grid; place-items: center; padding: 16px; }
 .modal-box {
-  width: 480px; max-width: 100%; max-height: calc(100vh - 32px); overflow: auto; background: var(--panel-solid);
+  width: 480px; max-width: 100%; max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); overflow: auto;
+  overscroll-behavior: contain; background: var(--panel-solid);
   border: 1px solid var(--line); border-radius: 16px; padding: 20px; position: relative; animation: slidein 0.2s;
 }
-.modal-box h2 { margin: 0 0 6px; font-weight: 900; }
+.modal-box h2 { margin: 0 0 6px; font-weight: 900; padding-inline-end: 32px; }
 label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 5px; }
+/* 16px text keeps iOS Safari from zooming in when a field is focused. */
 .field, textarea, select {
-  width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.05);
-  outline: none;
+  width: 100%; min-height: 44px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.05); outline: none; font-size: 16px;
 }
+textarea { resize: vertical; }
+input[type="search"] { -webkit-appearance: none; appearance: none; font-size: 16px; }
 .field:focus, textarea:focus, select:focus { border-color: var(--accent); }
 select option { background: var(--panel-solid); }
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .radio-row { display: flex; gap: 8px; }
-.radio-row label { flex: 1; margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; color: var(--text); font-size: 14px; }
-.radio-row input { accent-color: var(--accent); }
-.consent { display: flex; gap: 8px; align-items: flex-start; color: #cfd7e0; font-size: 13px; line-height: 1.7; margin-top: 14px; }
-.consent input { margin-top: 5px; accent-color: var(--accent); }
+.radio-row label {
+  flex: 1; margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; color: var(--text); font-size: 14px;
+  display: flex; align-items: center; gap: 8px; min-height: 44px;
+}
+.radio-row label:has(input:checked) { border-color: var(--accent); background: rgba(47, 210, 122, 0.08); }
+.radio-row input, .consent input { width: 18px; height: 18px; flex: none; margin: 0; accent-color: var(--accent); }
+.consent { display: flex; gap: 10px; align-items: flex-start; color: #cfd7e0; font-size: 13px; line-height: 1.7; margin-top: 14px; cursor: pointer; }
+.consent input { margin-top: 3px; }
 .form-error { color: #ff8aa0; font-size: 13px; min-height: 20px; margin-top: 8px; }
 .elevator-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }
 .elevator-grid button { padding: 16px 8px; border-radius: 10px; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.05); cursor: pointer; font-weight: 800; }
@@ -296,7 +307,10 @@ select option { background: var(--panel-solid); }
   #mall-list { top: auto; bottom: 0; inset-inline: 0; width: auto; height: 34vh; border-radius: 16px 16px 0 0; }
   #mall-card { inset-inline: 8px; bottom: 8px; width: auto; }
   .fab { bottom: calc(34vh + 12px); inset-inline-start: 12px; }
-  .drawer { top: auto; bottom: 0; inset-inline: 0; width: auto; max-width: none; height: 70vh; border-radius: 16px 16px 0 0; }
+  .drawer {
+    top: auto; bottom: 0; inset-inline: 0; width: auto; max-width: none; height: 70vh; height: 70dvh; border-radius: 16px 16px 0 0;
+    padding-bottom: calc(16px + env(safe-area-inset-bottom));
+  }
   #radar { width: 150px; height: 110px; }
   .radar-wrap { bottom: 12px; inset-inline-start: 10px; }
   .location-text { font-size: 12px; max-width: 170px; }
@@ -311,3 +325,19 @@ select option { background: var(--panel-solid); }
   .help-box { top: auto; bottom: 170px; inset-inline-end: 10px; max-width: 70vw; }
   .route-hint { bottom: 160px; font-size: 13px; }
 }
+
+/* Phones: forms stack into one column and the modal becomes a bottom sheet. */
+@media (max-width: 560px) {
+  .row2 { grid-template-columns: 1fr; gap: 0; }
+  .radio-row { flex-direction: column; }
+  .modal { place-items: end stretch; padding: 0; }
+  .modal-box {
+    width: 100%; max-height: 92vh; max-height: 92dvh; border-radius: 18px 18px 0 0; border-bottom: 0;
+    padding: 18px 16px calc(18px + env(safe-area-inset-bottom)); animation: sheetup 0.22s ease-out;
+  }
+  .modal-box h2 { font-size: 20px; }
+  form .btn, .actions-row .btn { min-height: 44px; }
+  form .actions-row .btn { flex: 1; justify-content: center; }
+  .form-error:empty { min-height: 8px; }
+}
+@keyframes sheetup { from { transform: translateY(40px); opacity: 0; } }

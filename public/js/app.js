@@ -313,19 +313,19 @@ function openRequest(prefill = '') {
     <div class="sub">بگویید چه می‌خواهید؛ همه فروشگاه‌هایی که این کالا را دارند خبردار می‌شوند و با شما تماس می‌گیرند یا پیشنهاد قیمت می‌فرستند.</div>
     <form id="req-form">
       <label>چه کالایی می‌خواهید؟</label>
-      <input class="field" name="query" required maxlength="100" placeholder="مثلاً آیفون ۱۶ پرو، کفش ورزشی سایز ۴۲" value="${esc(prefill)}">
+      <input class="field" name="query" required maxlength="100" enterkeyhint="next" placeholder="مثلاً آیفون ۱۶ پرو، کفش ورزشی سایز ۴۲" value="${esc(prefill)}">
       <label>توضیحات (رنگ، سایز، مدل…)</label>
       <textarea name="details" rows="2" maxlength="300"></textarea>
       <label>حداکثر بودجه (تومان، اختیاری)</label>
-      <input class="field" name="budget" inputmode="numeric" placeholder="مثلاً ۵۰۰۰۰۰۰۰">
+      <input class="field" name="budget" inputmode="numeric" autocomplete="off" enterkeyhint="next" placeholder="مثلاً ۵۰۰۰۰۰۰۰">
       <label>کجا جستجو شود؟</label>
       <div class="radio-row">
         ${state.mall ? `<label><input type="radio" name="scope" value="mall" checked> فقط ${esc(state.mall.name)}</label>` : ''}
         <label><input type="radio" name="scope" value="all" ${state.mall ? '' : 'checked'}> همه پاساژهای تهران</label>
       </div>
       <div class="row2">
-        <div><label>نام شما</label><input class="field" name="name" required maxlength="40" value="${esc(me.name || '')}"></div>
-        <div><label>شماره موبایل</label><input class="field" name="phone" required inputmode="tel" dir="ltr" placeholder="09121234567" value="${esc(me.phone || '')}"></div>
+        <div><label>نام شما</label><input class="field" name="name" required maxlength="40" autocomplete="name" enterkeyhint="next" value="${esc(me.name || '')}"></div>
+        <div><label>شماره موبایل</label><input class="field" name="phone" type="tel" required inputmode="tel" autocomplete="tel" dir="ltr" enterkeyhint="done" placeholder="09121234567" value="${esc(me.phone || '')}"></div>
       </div>
       <label class="consent"><input type="checkbox" name="consent" required> موافقم نام و شماره‌ام برای فروشگاه‌هایی که این کالا را دارند ارسال شود تا با من تماس بگیرند.</label>
       <div class="form-error" id="req-err"></div>

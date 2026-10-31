@@ -106,8 +106,8 @@ function renderRequests() {
       ${(r.myOffers || []).map((o) => `<div class="offer"><span class="sub">پیشنهاد شما ${timeAgo(o.createdAt)}:</span> ${o.price ? `<span class="price">${toman(o.price)}</span>` : ''} ${esc(o.message)}</div>`).join('')}
       <form class="offer hidden" data-form="${r.id}">
         <div class="row2">
-          <div><label>قیمت پیشنهادی (تومان)</label><input class="field" name="price" inputmode="numeric" value="${r.myProducts?.[0] ? Math.round(finalPrice(r.myProducts[0], shop)) : ''}"></div>
-          <div><label>پیام</label><input class="field" name="message" maxlength="300" placeholder="موجود است، رنگ مشکی…"></div>
+          <div><label>قیمت پیشنهادی (تومان)</label><input class="field" name="price" inputmode="numeric" autocomplete="off" value="${r.myProducts?.[0] ? Math.round(finalPrice(r.myProducts[0], shop)) : ''}"></div>
+          <div><label>پیام</label><input class="field" name="message" maxlength="300" enterkeyhint="send" placeholder="موجود است، رنگ مشکی…"></div>
         </div>
         <div class="actions-row"><button class="btn primary" type="submit">ارسال برای مشتری</button></div>
       </form>
@@ -137,7 +137,7 @@ function renderDiscount() {
       <h3 style="margin-top:0">تخفیف فعلی: ${d ? `<span class="chip">${fa(d.percent)}٪ — ${esc(d.title)}</span>` : 'ندارد'}</h3>
       <div class="sub">مشتری‌ها وقتی روی نقشه از جلوی مغازه شما رد شوند، اعلان تخفیف می‌گیرند.</div>
       <form id="disc-form" class="row2">
-        <div><label>درصد تخفیف</label><input class="field" name="percent" type="number" min="0" max="90" value="${d?.percent ?? 20}"></div>
+        <div><label>درصد تخفیف</label><input class="field" name="percent" type="number" inputmode="numeric" min="0" max="90" value="${d?.percent ?? 20}"></div>
         <div><label>عنوان</label><input class="field" name="title" maxlength="40" value="${esc(d?.title ?? 'حراج ویژه')}"></div>
         <div class="actions-row"><button class="btn primary" type="submit">ذخیره تخفیف</button>
           ${d ? '<button class="btn danger" type="button" id="disc-off">حذف تخفیف</button>' : ''}</div>
@@ -159,9 +159,9 @@ function renderProducts() {
     <div class="box">
       <h3 style="margin-top:0">افزودن کالا</h3>
       <form id="prod-form" class="row2">
-        <div><label>نام کالا</label><input class="field" name="name" required maxlength="60"></div>
-        <div><label>قیمت (تومان)</label><input class="field" name="price" required inputmode="numeric"></div>
-        <div style="grid-column:1/-1"><label>کلمات کلیدی (برای پیدا شدن در جستجو و درخواست‌ها)</label><input class="field" name="tags" maxlength="120" placeholder="مثلاً گوشی سامسونگ موبایل"></div>
+        <div><label>نام کالا</label><input class="field" name="name" required maxlength="60" autocomplete="off" enterkeyhint="next"></div>
+        <div><label>قیمت (تومان)</label><input class="field" name="price" required inputmode="numeric" autocomplete="off" enterkeyhint="next"></div>
+        <div style="grid-column:1/-1"><label>کلمات کلیدی (برای پیدا شدن در جستجو و درخواست‌ها)</label><input class="field" name="tags" maxlength="120" autocomplete="off" enterkeyhint="done" placeholder="مثلاً گوشی سامسونگ موبایل"></div>
         <div class="actions-row"><button class="btn primary" type="submit">افزودن</button></div>
       </form>
     </div>
