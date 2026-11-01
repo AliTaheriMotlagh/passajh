@@ -1,7 +1,10 @@
 // GTA-style indoor map engine: floor grid, rendering, player movement, radar, A* routing.
+// Floors are either schematic (rectangles) or real plans (`real`: polygons in metres; every shape may
+// carry `poly` next to its bounding box). Both are rasterized onto the same 1 m grid for walking and routing.
 
 import { CATEGORIES, AMENITIES } from '/shared/catalog.js';
 import { toFaDigits } from '/shared/text.js';
+import { scanFill, pointInPoly } from '/shared/frame.js';
 
 const T = { BLOCK: 0, WALK: 1, STORE: 2, DOOR: 3, VOID: 4, ESC: 5, ELEV: 6, STAIR: 7, SEAT: 8 };
 const WALKABLE = [false, true, true, true, false, true, true, true, true];
@@ -26,21 +29,44 @@ class FloorGrid {
     for (const r of floor.voids) this.fill(r, T.VOID);
     for (const r of floor.seating) this.fill(r, T.SEAT);
     floor.stores.forEach((s, i) => {
+      if (s.poly) return this.fill(s, T.STORE, i);
       this.fill(s, T.BLOCK);
       this.fill({ x: s.x + 1, y: s.y + 1, w: s.w - 2, h: s.h - 2 }, T.STORE, i);
       this.fill(s.door, T.DOOR, i);
+    });
+    // Real units: the cells along a unit's edge are its walls, except the door.
+    floor.stores.forEach((s, i) => {
+      if (!s.poly) return;
+      const x0 = Math.max(0, Math.floor(s.x)), y0 = Math.max(0, Math.floor(s.y));
+      for (let y = y0; y < Math.min(this.h, Math.ceil(s.y + s.h)); y++) {
+        for (let x = x0; x < Math.min(this.w, Math.ceil(s.x + s.w)); x++) {
+          const k = y * this.w + x;
+          if (this.sid[k] !== i) continue;
+          const edge = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => this.sidAt(x + dx, y + dy) !== i);
+          if (edge) this.t[k] = x === s.door.x && y === s.door.y ? T.DOOR : T.BLOCK;
+        }
+      }
     });
     for (const r of floor.escalators) this.fill(r, T.ESC);
     for (const r of floor.elevators) this.fill(r, T.ELEV);
     for (const r of floor.stairs) this.fill(r, T.STAIR);
   }
   fill(r, v, sid = -1) {
+    if (r.poly) {
+      return scanFill(r.poly, this.w, this.h, (x, y) => {
+        this.t[y * this.w + x] = v;
+        this.sid[y * this.w + x] = sid;
+      });
+    }
     for (let y = Math.max(0, r.y); y < Math.min(this.h, r.y + r.h); y++) {
       for (let x = Math.max(0, r.x); x < Math.min(this.w, r.x + r.w); x++) {
         this.t[y * this.w + x] = v;
         this.sid[y * this.w + x] = sid;
       }
     }
+  }
+  sidAt(x, y) {
+    return x < 0 || y < 0 || x >= this.w || y >= this.h ? -1 : this.sid[y * this.w + x];
   }
   at(x, y) {
     x = Math.floor(x); y = Math.floor(y);
@@ -164,6 +190,15 @@ function roundRect(ctx, x, y, w, h, r) {
 
 const center = (r) => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
 
+// Outline of a shape (polygon or rectangle) as the current path.
+function trace(ctx, r, inset = 0) {
+  ctx.beginPath();
+  if (!r.poly) return ctx.rect(r.x + inset, r.y + inset, r.w - 2 * inset, r.h - 2 * inset);
+  r.poly.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+  ctx.closePath();
+}
+const inside = (r, p) => (r.poly ? pointInPoly(p.x, p.y, r.poly) : p.x >= r.x && p.x < r.x + r.w && p.y >= r.y && p.y < r.y + r.h);
+
 export class MallEngine {
   constructor(canvas, radar, hooks) {
     this.canvas = canvas;
@@ -201,11 +236,14 @@ export class MallEngine {
     this.gps = null;
     this.north = null;
     const ground = mall.floors.find((f) => f.level === 0) ?? mall.floors[0];
-    const entrance = ground.amenities.find((a) => a.type === 'entrance' && a.y > ground.h / 2);
+    const entrance = ground.amenities.find((a) => a.type === 'entrance' && a.y > ground.h / 2)
+      ?? ground.amenities.find((a) => a.type === 'entrance');
     this.player = {
       floor: ground.id, x: entrance ? entrance.x : ground.w / 2, y: entrance ? entrance.y - 1.5 : ground.h / 2,
       heading: -Math.PI / 2, moving: false,
     };
+    const start = this.nearestOpen(this.player.x, this.player.y, ground.id, 60);
+    if (start) Object.assign(this.player, start);
     this.viewFloor = ground.id;
     this.lastCell = null;
     this.lastStore = null;
@@ -423,7 +461,7 @@ export class MallEngine {
     const r = this.canvas.getBoundingClientRect();
     const p = this.toWorld(clientX - r.left, clientY - r.top);
     const grid = this.grids.get(this.viewFloor);
-    const store = grid.floor.stores.find((s) => p.x >= s.x && p.x < s.x + s.w && p.y >= s.y && p.y < s.y + s.h);
+    const store = grid.floor.stores.find((s) => inside(s, p));
     if (store) { this.hooks.onStoreClick?.(store); return; }
     const spot = grid.floor.spots?.find((sp) => p.x >= sp.x && p.x < sp.x + sp.w && p.y >= sp.y && p.y < sp.y + sp.h);
     if (spot) { this.hooks.onSpotClick?.(spot, grid.floor); return; }
@@ -468,7 +506,7 @@ export class MallEngine {
       if (cur >= 0 && target >= 0) {
         options = this.floor.escalators
           .filter((e) => (target > cur ? e.dir === 'up' : e.dir === 'down'))
-          .map((e) => ({ kind: 'escalator', conn: e, goal: { x: e.entry.x < e.x ? e.x : e.x + e.w - 1, y: e.entry.y } }));
+          .map((e) => ({ kind: 'escalator', conn: e, goal: e.goal ?? { x: e.entry.x < e.x ? e.x : e.x + e.w - 1, y: e.entry.y } }));
       }
       if (!options.length) {
         options = this.floor.elevators.map((e) => ({ kind: 'elevator', conn: e, goal: { x: e.x + e.w - 1, y: e.y + 1 } }));
@@ -636,8 +674,9 @@ export class MallEngine {
       }
     }
     p.floor = floorId;
-    p.x = spawn.x;
-    p.y = spawn.y;
+    const open = this.nearestOpen(spawn.x, spawn.y, floorId, 12);
+    p.x = open?.x ?? spawn.x;
+    p.y = open?.y ?? spawn.y;
     this.viewFloor = floorId;
     this.cam.x = p.x;
     this.cam.y = p.y;
@@ -712,21 +751,28 @@ export class MallEngine {
     const px = 1 / s; // one screen pixel in world units
     const t = this.time;
 
-    // Slab
-    roundRect(ctx, -0.6, -0.6, f.w + 1.2, f.h + 1.2, 1.2);
-    ctx.fillStyle = COLORS.slab;
-    ctx.fill();
-    ctx.lineWidth = 2 * px;
-    ctx.strokeStyle = COLORS.slabEdge;
-    ctx.stroke();
+    // Slab: the real building outline, or the schematic rectangle
+    if (f.outline) {
+      ctx.lineWidth = 3 * px;
+      ctx.strokeStyle = COLORS.slabEdge;
+      for (const ring of f.outline) { trace(ctx, { poly: ring }); ctx.stroke(); }
+    } else {
+      roundRect(ctx, -0.6, -0.6, f.w + 1.2, f.h + 1.2, 1.2);
+      ctx.fillStyle = COLORS.slab;
+      ctx.fill();
+      ctx.lineWidth = 2 * px;
+      ctx.strokeStyle = COLORS.slabEdge;
+      ctx.stroke();
+    }
 
     ctx.fillStyle = f.type === 'parking' ? COLORS.parking : COLORS.walk;
-    for (const r of f.walk) ctx.fillRect(r.x, r.y, r.w, r.h);
+    for (const r of f.walk) { trace(ctx, r); ctx.fill(); }
 
     for (const r of f.services) {
       ctx.fillStyle = COLORS.service;
-      ctx.fillRect(r.x, r.y, r.w, r.h);
-      if (detailed) {
+      trace(ctx, r);
+      ctx.fill();
+      if (detailed && !r.poly) {
         ctx.save();
         ctx.beginPath(); ctx.rect(r.x, r.y, r.w, r.h); ctx.clip();
         ctx.strokeStyle = 'rgba(255,255,255,0.05)';
@@ -758,11 +804,13 @@ export class MallEngine {
       const g = ctx.createLinearGradient(v.x, v.y, v.x, v.y + v.h);
       g.addColorStop(0, '#0a1119'); g.addColorStop(0.5, COLORS.void); g.addColorStop(1, '#0a1119');
       ctx.fillStyle = g;
-      ctx.fillRect(v.x, v.y, v.w, v.h);
+      trace(ctx, v);
+      ctx.fill();
       ctx.strokeStyle = COLORS.rail;
       ctx.globalAlpha = 0.55;
       ctx.lineWidth = 0.14;
-      ctx.strokeRect(v.x + 0.07, v.y + 0.07, v.w - 0.14, v.h - 0.14);
+      trace(ctx, v, v.poly ? 0 : 0.07);
+      ctx.stroke();
       ctx.globalAlpha = 1;
       if (detailed && s > 9) {
         ctx.fillStyle = 'rgba(143,179,217,0.25)';
@@ -774,8 +822,9 @@ export class MallEngine {
     // Food-court seating
     for (const r of f.seating) {
       ctx.fillStyle = COLORS.seat;
-      ctx.fillRect(r.x, r.y, r.w, r.h);
-      if (detailed) {
+      trace(ctx, r);
+      ctx.fill();
+      if (detailed && !r.poly) {
         ctx.fillStyle = 'rgba(255,220,170,0.25)';
         for (let x = r.x + 1.5; x < r.x + r.w - 0.5; x += 2.5) {
           for (let y = r.y + 1; y < r.y + r.h - 0.5; y += 2) { ctx.beginPath(); ctx.arc(x, y, 0.45, 0, Math.PI * 2); ctx.fill(); }
@@ -785,6 +834,12 @@ export class MallEngine {
 
     // Stores
     for (const st of f.stores) this.drawStore(ctx, st, s, detailed);
+    if (f.unmapped && detailed) {
+      ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      this.text(ctx, '700', Math.max(1.4, 16 / s), 'center');
+      const c = f.outline ? { x: f.w / 2, y: f.h / 2 } : center(f);
+      this.ft(ctx, 'نقشه این طبقه هنوز ثبت نشده', c.x, c.y);
+    }
 
     // Escalators (پله برقی)
     for (const e of f.escalators) {
@@ -855,24 +910,26 @@ export class MallEngine {
     const hl = this.highlight.has(st.id);
     ctx.globalAlpha = dim ? 0.18 : 1;
     ctx.fillStyle = cat.color + (hl ? 'ee' : '99');
-    ctx.fillRect(st.x + 0.08, st.y + 0.08, st.w - 0.16, st.h - 0.16);
+    trace(ctx, st, st.poly ? 0 : 0.08);
+    ctx.fill();
     ctx.strokeStyle = cat.color;
-    ctx.lineWidth = 0.16;
-    ctx.strokeRect(st.x + 0.08, st.y + 0.08, st.w - 0.16, st.h - 0.16);
+    ctx.lineWidth = st.poly ? Math.max(0.1, 1.2 / s) : 0.16;
+    ctx.stroke();
     // Entrance
     ctx.fillStyle = 'rgba(255,255,255,0.85)';
     const d = st.door;
-    if (d.w > d.h) ctx.fillRect(d.x, d.y + (d.y === st.y ? 0 : d.h - 0.22), d.w, 0.22);
+    if (st.poly) ctx.fillRect(d.x + 0.25, d.y + 0.25, 0.5, 0.5);
+    else if (d.w > d.h) ctx.fillRect(d.x, d.y + (d.y === st.y ? 0 : d.h - 0.22), d.w, 0.22);
     else ctx.fillRect(d.x + (d.x === st.x ? 0 : d.w - 0.22), d.y, 0.22, d.h);
 
     if (hl) {
       ctx.strokeStyle = '#f5c518';
       ctx.lineWidth = 0.18 + 0.1 * Math.sin(this.time * 6);
-      ctx.strokeRect(st.x - 0.2, st.y - 0.2, st.w + 0.4, st.h + 0.4);
+      if (st.poly) { trace(ctx, st); ctx.stroke(); } else ctx.strokeRect(st.x - 0.2, st.y - 0.2, st.w + 0.4, st.h + 0.4);
     }
 
     if (detailed && !st.vacant) {
-      const c = center(st);
+      const c = st.label ?? center(st);
       const big = st.w * s > 46 && st.h * s > 30;
       this.text(ctx, '', Math.min(st.w, st.h) * 0.32, 'center');
       ctx.fillStyle = '#fff';
@@ -1077,17 +1134,17 @@ export class MallEngine {
     ctx.save();
     ctx.translate(W / 2 - p.x * s, H / 2 - p.y * s);
     ctx.scale(s, s);
-    ctx.fillStyle = COLORS.slab;
-    ctx.fillRect(0, 0, f.w, f.h);
+    if (!f.outline) { ctx.fillStyle = COLORS.slab; ctx.fillRect(0, 0, f.w, f.h); }
+    const fill = (r, inset = 0) => { trace(ctx, r, r.poly ? 0 : inset); ctx.fill(); };
     ctx.fillStyle = f.type === 'parking' ? COLORS.parking : '#56657a';
-    for (const r of f.walk) ctx.fillRect(r.x, r.y, r.w, r.h);
+    for (const r of f.walk) fill(r);
     ctx.fillStyle = COLORS.void;
-    for (const r of f.voids) ctx.fillRect(r.x, r.y, r.w, r.h);
+    for (const r of f.voids) fill(r);
     ctx.fillStyle = COLORS.seat;
-    for (const r of f.seating) ctx.fillRect(r.x, r.y, r.w, r.h);
+    for (const r of f.seating) fill(r);
     for (const st of f.stores) {
       ctx.fillStyle = CATEGORIES[st.category].color + '88';
-      ctx.fillRect(st.x + 0.2, st.y + 0.2, st.w - 0.4, st.h - 0.4);
+      fill(st, 0.2);
     }
     for (const e of f.escalators) { ctx.fillStyle = e.dir === 'up' ? COLORS.up : COLORS.down; ctx.fillRect(e.x, e.y + 0.3, e.w, e.h - 0.6); }
     if (this.route) {

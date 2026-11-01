@@ -51,13 +51,29 @@ Works on iPhone (Safari) and Android (Chrome) and installs to the home screen as
 | Every mall, passage (پاساژ) and bazaar in Tehran: 775, incl. Amin Hozour, Lalehzar, Jomhouri/Alaedin, the Grand Bazaar, Tehranpars, Tajrish | OpenStreetMap snapshot in `data/tehran.json` (`npm run data` refreshes it) |
 | Building outlines, opening hours, phone, website, Instagram, neighbourhood | Same snapshot (OpenStreetMap tags) |
 | Shops inside malls (~880, with category, floor when tagged, phone, hours) | OpenStreetMap shops inside each mall's outline, placed in the unit nearest their real position |
+| **Real indoor floor plans**: Iran Mall, Ahura 2 (Shiraz, 6 floors), Zeytoon Fars, Morvarid (Kish), Almas Iran | OpenStreetMap indoor mapping (`indoor=room/area` + `level`), imported for all of Iran into `data/plans-osm.json` (`npm run indoor`) |
+| Real floor plans of any other mall | Drawn in the editor at `/editor`, saved in the db (`plans` table) and applied live |
 | Floors and parking of the big malls (Iran Mall, Palladium, Sana, Opal, Kourosh, Arg, Tandis, Charsou, Alaedin, Amin Hozour) | `CURATED` in `lib/seed.js` |
 | Malls outside Tehran | OpenStreetMap via the server (`GET /api/discover`), cached in the db |
 | Shops that register themselves, products, prices, discounts | The seller panel: pick an empty unit, enter name, category, phone and hours (`POST /api/stores/:id/profile`) |
 | Requests, offers, seller edits, discovered malls | Neon Postgres when `DATABASE_URL` is set, otherwise `data/db.json` |
 | Parking, shopping list, favorites | This device only (`localStorage`) |
 
-No store names, prices, phone numbers, ratings or discounts are made up. Real indoor floor plans of Tehran malls aren't public, so each mall gets a **schematic** plan sized to its real footprint; units without a known shop are shown grey ("ثبت‌نشده") until a shop claims one. To use a surveyed plan, put it in `data/layouts/<mallId>.json` as `{ "floors": [...] }` (copy the shape from `GET /api/malls/<mallId>`).
+No store names, prices, phone numbers, ratings or discounts are made up. A mall with a real floor plan shows it (real shop shapes, doors where they meet the corridor, exact GPS position); floors it hasn't mapped yet show the building outline with the lifts. Every other mall gets a **schematic** plan sized to its real footprint. Units without a known shop are grey ("ثبت‌نشده") until a shop claims one.
+
+### Adding real floor plans
+
+1. Photograph the **evacuation plan (نقشه فرار اضطراری)** or floor directory on each floor, or get the CAD/PDF plan from the mall's management.
+2. Open `/editor`, pick the mall and floor, load the photo and line it up over the real building outline (size, rotation, opacity, drag).
+3. Trace shops with the 3-click rectangle (shop front, then depth) or the polygon tool; vertices snap to neighbouring shops. Mark atriums, closed areas, entrances, lifts, stairs, escalators, toilets and the prayer room. Purple dots are shops OpenStreetMap already knows; a unit drawn around one takes its name.
+4. For passages where every floor is alike, draw one floor and use «کپی از طبقه…».
+5. Save. The mall is rebuilt immediately (on every server instance within a few seconds).
+
+Plan format (lat/lng, so it survives changes to the drawing): `{ floors: [{ id: 'G', units: [{ uid, ring, name, category, phone, hours }], areas: [{ kind: 'void'|'service'|'seating', ring }], points: [{ type, lat, lng, dir }] }] }`. Corridors aren't drawn: inside the outline and outside the units is walkable. `GET/POST /api/plans/:mallId`.
+
+Mapping indoor data in OpenStreetMap itself (JOSM + the Simple Indoor Tagging scheme) is also picked up by `npm run indoor` and benefits every map app.
+
+A hand-made layout in the indoor engine's own grid format can still go in `data/layouts/<mallId>.json` (copy the shape from `GET /api/malls/<mallId>`).
 
 **Map**: MapLibre GL with OpenFreeMap vector tiles (no API key, Persian labels), falling back to the standard OpenStreetMap raster tiles if OpenFreeMap is unreachable. Malls cluster when zoomed out; names and real outlines appear from zoom 14. District chips jump to Amin Hozour, Tehranpars, Jomhouri & Alaedin, Lalehzar, the Grand Bazaar, Tajrish, Sadeghieh and Vanak.
 
@@ -65,7 +81,8 @@ No store names, prices, phone numbers, ratings or discounts are made up. Real in
 
 ## Before going live
 
-- The seller panel has **no authentication**. Anyone can pick any store or register a shop in any empty unit. Add real seller accounts (for example SMS OTP) before real use.
+- The seller panel has **no authentication**. Anyone can pick any store or register a shop in any empty unit.
+- **Set `EDITOR_KEY`** in production: without it anyone can redraw a mall's floor plan. With it, saving needs the key (entered in the editor's sidebar). Add real seller accounts (for example SMS OTP) before real use.
 - Shopper identity is a random ID in `localStorage`.
 - Without `DATABASE_URL`, `data/db.json` is a single-process JSON store. On Vercel, connect a Neon database (Storage → Neon) so data is shared and persistent; tables are created automatically.
 

@@ -68,3 +68,71 @@ export function areaOf(rings) {
   }
   return Math.round(total);
 }
+
+// ---------- real floor plans (metres on a north-up grid) ----------
+
+// A real plan's grid: x metres east and y metres south of `geo` (the plan's north-west corner).
+export function geoFrame(geo) {
+  const kx = 111320 * Math.cos((geo.lat * Math.PI) / 180), ky = 110540;
+  return {
+    cellMeters: 1,
+    north: -Math.PI / 2,
+    toGrid: (lat, lng) => ({ x: (lng - geo.lng) * kx, y: (geo.lat - lat) * ky }),
+    toLatLng: (x, y) => ({ lat: geo.lat - y / ky, lng: geo.lng + x / kx }),
+  };
+}
+
+export function pointInPoly(x, y, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+// Call fn(x, y) for every cell of a w×h grid whose center is inside the polygon (scanline, even-odd).
+export function scanFill(poly, w, h, fn) {
+  let y0 = Infinity, y1 = -Infinity;
+  for (const [, y] of poly) { y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+  for (let y = Math.max(0, Math.floor(y0)); y < Math.min(h, Math.ceil(y1)); y++) {
+    const cy = y + 0.5;
+    const xs = [];
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const [xi, yi] = poly[i], [xj, yj] = poly[j];
+      if ((yi > cy) !== (yj > cy)) xs.push(xi + ((cy - yi) * (xj - xi)) / (yj - yi));
+    }
+    xs.sort((a, b) => a - b);
+    for (let k = 0; k + 1 < xs.length; k += 2) {
+      for (let x = Math.max(0, Math.ceil(xs[k] - 0.5)); x < Math.min(w, Math.ceil(xs[k + 1] - 0.5)); x++) fn(x, y);
+    }
+  }
+}
+
+// Bounding box {x, y, w, h} of a polygon.
+export function bboxOf(poly) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const [x, y] of poly) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
+// A point inside the polygon for its label: the area centroid, or the inside cell nearest to it.
+export function labelPoint(poly) {
+  let a = 0, cx = 0, cy = 0;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const f = poly[j][0] * poly[i][1] - poly[i][0] * poly[j][1];
+    a += f; cx += (poly[j][0] + poly[i][0]) * f; cy += (poly[j][1] + poly[i][1]) * f;
+  }
+  const c = a ? { x: cx / (3 * a), y: cy / (3 * a) } : { x: poly[0][0], y: poly[0][1] };
+  if (pointInPoly(c.x, c.y, poly)) return c;
+  const b = bboxOf(poly);
+  let best = null;
+  for (let y = b.y + 0.25; y < b.y + b.h; y += 0.5) {
+    for (let x = b.x + 0.25; x < b.x + b.w; x += 0.5) {
+      if (!pointInPoly(x, y, poly)) continue;
+      const d = Math.hypot(x - c.x, y - c.y);
+      if (!best || d < best.d) best = { x, y, d };
+    }
+  }
+  return best ? { x: best.x, y: best.y } : c;
+}

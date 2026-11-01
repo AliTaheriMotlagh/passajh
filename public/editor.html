@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1118">
+  <title>ویرایشگر نقشه داخلی — پاساژ</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;600;700;800;900&display=swap">
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+  <link rel="stylesheet" href="/css/app.css">
+  <style>
+    body { display: grid; grid-template-columns: 340px 1fr; grid-template-rows: auto 1fr; height: 100dvh; }
+    .ed-top { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; padding: 8px 12px; background: var(--surface-2); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+    .ed-top .brand { font-size: 20px; }
+    .ed-top select, .ed-top input { min-height: 38px; width: auto; }
+    #ed-mall-q { width: 200px; }
+    #ed-mall { max-width: 280px; }
+    .ed-side { overflow: auto; padding: 12px; background: var(--surface-sheet); border-inline-end: 1px solid var(--border); }
+    .ed-side h3 { font-size: 13px; color: var(--text-3); margin: 14px 0 6px; }
+    #ed-map { position: relative; }
+    .tools { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+    .tools button { min-height: 40px; border-radius: var(--r-sm); border: 1px solid var(--border); background: rgba(255,255,255,0.05); cursor: pointer; font-size: 12px; font-weight: 700; padding: 4px; }
+    .tools button.on { background: var(--brand); color: var(--on-brand); border-color: transparent; }
+    .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    .row label { margin: 0; }
+    input[type=range] { width: 100%; accent-color: var(--brand); }
+    .hint { font-size: 12px; color: var(--text-3); line-height: 1.8; }
+    .stat { font-size: 12px; color: var(--text-2); }
+    .ed-status { position: absolute; z-index: 5; top: 10px; inset-inline-start: 10px; background: rgba(10,16,22,0.88); padding: 6px 12px; border-radius: var(--r-pill); font-size: 13px; pointer-events: none; }
+    .dirty::after { content: ' •'; color: var(--warn); }
+    @media (max-width: 760px) { body { grid-template-columns: 1fr; grid-template-rows: auto 45dvh 1fr; } .ed-side { order: 3; } }
+  </style>
+</head>
+<body>
+  <header class="ed-top">
+    <div class="brand">پاساژ<small>FLOOR PLAN EDITOR</small></div>
+    <input class="field" id="ed-mall-q" type="search" placeholder="جستجوی پاساژ…" autocomplete="off">
+    <select id="ed-mall"></select>
+    <select id="ed-floor" aria-label="طبقه"></select>
+    <button class="btn small" id="ed-add-floor">+ طبقه</button>
+    <button class="btn small" id="ed-copy-floor" title="کپی واحدهای یک طبقه دیگر به این طبقه">کپی از طبقه…</button>
+    <span class="grow"></span>
+    <button class="btn small" id="ed-undo" title="Ctrl+Z">↶ برگرداندن</button>
+    <button class="btn small" id="ed-sat">🛰️ ماهواره</button>
+    <a class="btn small" id="ed-view" href="/">👁 مشاهده</a>
+    <button class="btn primary" id="ed-save">💾 ذخیره</button>
+  </header>
+
+  <aside class="ed-side">
+    <div class="stat" id="ed-stat"></div>
+    <h3>ابزار</h3>
+    <div class="tools" id="ed-tools">
+      <button data-tool="select" class="on">↖ انتخاب</button>
+      <button data-tool="rect">▭ مغازه (۳ کلیک)</button>
+      <button data-tool="unit">⬠ مغازه (چندضلعی)</button>
+      <button data-tool="void">◌ نورگیر/آتریوم</button>
+      <button data-tool="service">▨ بسته/تأسیسات</button>
+      <button data-tool="seating">🍽 میز غذاخوری</button>
+      <button data-tool="point:entrance">🚪 ورودی</button>
+      <button data-tool="point:elevator">🛗 آسانسور</button>
+      <button data-tool="point:stairs">🪜 پله</button>
+      <button data-tool="point:escalator:up">⬆ پله برقی بالا</button>
+      <button data-tool="point:escalator:down">⬇ پله برقی پایین</button>
+      <button data-tool="point:wc">🚻 سرویس</button>
+      <button data-tool="point:prayer">🕌 نمازخانه</button>
+      <button data-tool="point:atm">🏧 خودپرداز</button>
+      <button data-tool="point:info">ℹ️ اطلاعات</button>
+    </div>
+    <p class="hint" id="ed-hint"></p>
+
+    <div id="ed-selected"></div>
+
+    <h3>عکس نقشه (برای ردگیری)</h3>
+    <p class="hint">از «نقشه فرار اضطراری» یا «راهنمای طبقات» هر طبقه عکس بگیرید، اینجا بگذارید و روی ساختمان جا بیندازید. عکس فقط در مرورگر شما می‌ماند و ذخیره نمی‌شود.</p>
+    <input class="field" type="file" id="ed-img" accept="image/*">
+    <div id="ed-img-ctl" class="hidden">
+      <label>شفافیت</label><input type="range" id="ed-img-op" min="0" max="1" step="0.05" value="0.6">
+      <label>اندازه (عرض به متر): <b id="ed-img-w-v"></b></label><input type="range" id="ed-img-w" min="10" max="800" step="1">
+      <label>چرخش: <b id="ed-img-r-v"></b></label><input type="range" id="ed-img-r" min="-180" max="180" step="0.5" value="0">
+      <div class="row" style="margin-top:8px">
+        <button class="btn small" data-tool="image">✥ جابه‌جایی با ماوس</button>
+        <button class="btn small" id="ed-img-center">وسط ساختمان</button>
+        <button class="btn small danger" id="ed-img-del">حذف عکس</button>
+      </div>
+    </div>
+
+    <h3>کلید ویرایشگر</h3>
+    <p class="hint">اگر روی سرور EDITOR_KEY تنظیم شده، برای ذخیره لازم است.</p>
+    <input class="field" id="ed-key" type="password" autocomplete="off" placeholder="کلید">
+  </aside>
+
+  <main id="ed-map"><div class="ed-status" id="ed-status"></div></main>
+
+  <div id="modal" class="modal hidden"><div class="modal-box" id="modal-box"></div></div>
+  <div id="toasts" class="toasts"></div>
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script type="module" src="/js/editor.js"></script>
+</body>
+</html>

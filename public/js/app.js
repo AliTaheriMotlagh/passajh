@@ -5,6 +5,7 @@ import { $, $$, esc, fa, toman, cat, finalPrice, api, toast, openModal, closeMod
 import { CityView } from './city.js';
 import { MallEngine } from './mall.js';
 import { geo, distance, fmtDist, mallFrame } from './geo.js';
+import { geoFrame } from '/shared/frame.js';
 import { state, uid, go, findStore, floorOf } from './state.js';
 import { openParking, onSpotClick, restoreParking, renderParkChip } from './parking.js';
 import { openList, renderListBadge, onTourArrive, openFavs, isFav, toggleFav, storeFav, productFav, compare, addRecent, getRecent } from './shopping.js';
@@ -82,8 +83,9 @@ async function enterMall(id, storeId) {
     renderQuickBar();
     const st = openStatus(mall.hours);
     const real = mall.floors.reduce((n, f) => n + f.stores.filter((s) => !s.vacant).length, 0);
+    const plan = mall.plan ? `نقشه واقعی ${mall.plan.source === 'osm' ? 'از OpenStreetMap' : 'ثبت‌شده'} (${fa(mall.floors.filter((f) => !f.unmapped).length)} طبقه)` : 'نقشه داخلی شماتیک است';
     help(`به <b>${esc(mall.name)}</b> خوش آمدید! 👋${st && !st.open ? ` <span class="closed">(${st.text})</span>` : ''}
-      <br>${real ? `${fa(real)} فروشگاه ثبت‌شده روی نقشه است` : 'هنوز فروشگاهی برای این پاساژ ثبت نشده'}؛ نقشه داخلی شماتیک است و واحدهای خاکستری ثبت نشده‌اند.
+      <br>${real ? `${fa(real)} فروشگاه ثبت‌شده روی نقشه است` : 'هنوز فروشگاهی برای این پاساژ ثبت نشده'}؛ ${plan} و واحدهای خاکستری ثبت نشده‌اند.
       <br>با جوی‌استیک یا لمس راهرو راه بروید.`, 9000);
     setupFrame(id);
   }
@@ -108,10 +110,12 @@ function setupFrame(id) {
   const ready = () => {
     if (state.mall?.id !== id) return;
     const g = state.engine.ground;
-    state.frame = mallFrame(sum, g.w, g.h);
-    state.engine.north = sum.rings?.length ? state.frame.north : null;
+    // A real plan is already in metres from a known corner; a schematic one is fitted to the outline.
+    state.frame = state.mall.geo ? geoFrame(state.mall.geo) : mallFrame(sum, g.w, g.h);
+    state.engine.north = state.mall.geo || sum.rings?.length ? state.frame.north : null;
     applyGps(true);
   };
+  if (state.mall.geo) return ready();
   if (city.mall(id)) city.footprint(sum).catch(() => {}).finally(ready);
   else ready();
 }
@@ -306,7 +310,7 @@ function openVacant(s) {
       <div class="store-ico" style="background:${cat('vacant').color}">🏬</div>
       <div class="grow"><h2>${esc(s.name)}</h2><div class="sub">${esc(f.name)} · ثبت‌نشده</div></div>
     </div>
-    <p class="sub">نقشه داخلی این پاساژ شماتیک است و هنوز فروشگاهی برای این واحد ثبت نشده. فروشگاه‌هایی که در OpenStreetMap ثبت شده‌اند، نزدیک جای واقعی‌شان روی نقشه آمده‌اند.</p>
+    <p class="sub">${state.mall.plan ? 'این واحد در نقشه واقعی پاساژ هست ولی هنوز نام فروشگاهش ثبت نشده.' : 'نقشه داخلی این پاساژ شماتیک است و هنوز فروشگاهی برای این واحد ثبت نشده. فروشگاه‌هایی که در OpenStreetMap ثبت شده‌اند، نزدیک جای واقعی‌شان روی نقشه آمده‌اند.'}</p>
     <div class="actions-row">
       <a class="btn primary" href="/seller?store=${encodeURIComponent(s.id)}">🏪 فروشنده هستید؟ مغازه‌تان را ثبت کنید</a>
     </div>`);
@@ -620,7 +624,7 @@ function openHub() {
     ${!standalone() && (installPrompt || isIOS) ? '<button class="btn block install-btn" id="hub-install">📲 نصب اپلیکیشن روی گوشی</button>' : ''}
     ${recent.length ? `<h3>🕘 اخیراً دیده‌شده</h3>${recent.map((r) => `<div class="result" data-go="${r.mallId}/${r.id}">
       <div class="ico">${cat(r.category).icon}</div><div class="main"><div class="title">${esc(r.name)}</div><div class="sub">${esc(r.mallName)}</div></div></div>`).join('')}` : ''}
-    <div class="hub-foot"><a href="/seller">پنل فروشندگان</a> · داده نقشه از OpenStreetMap</div>`);
+    <div class="hub-foot"><a href="/seller">پنل فروشندگان</a> · <a href="/editor">ویرایشگر نقشه داخلی</a> · داده نقشه از OpenStreetMap</div>`);
   const open = { list: openList, favs: openFavs, friends: openFriends, parking: () => openParking(), myreq: openMyRequests, request: () => { el.classList.add('hidden'); openRequest(); } };
   for (const b of $$('[data-open]', el)) b.onclick = () => open[b.dataset.open]();
   for (const r of $$('[data-go]', el)) r.onclick = () => go(`#/mall/${r.dataset.go}`);

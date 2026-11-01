@@ -39,6 +39,8 @@ const storeById = new Map(); // id -> { store, mall, floor }
 const base = new Map();
 const PROFILE = ['name', 'category', 'phone', 'hours', 'instagram', 'vacant', 'claimed'];
 
+const defs = new Map(); // mall id -> the definition it was built from, for rebuilding when its plan changes
+
 function register(mall) {
   if (mallById.has(mall.id)) return;
   // A surveyed floor plan in data/layouts/<mallId>.json replaces the generated one.
@@ -57,18 +59,57 @@ function register(mall) {
   }
 }
 
+function unregister(id) {
+  const old = mallById.get(id);
+  if (!old) return;
+  for (const f of old.floors) for (const s of f.stores) { storeById.delete(s.id); base.delete(s.id); }
+  malls.splice(malls.indexOf(old), 1);
+  mallById.delete(id);
+}
+
+// Real floor plans: drawn in the editor (db) win over OpenStreetMap indoor mapping (data/plans-osm.json).
+const OSM_PLANS = JSON.parse(readFileSync(new URL('./data/plans-osm.json', import.meta.url), 'utf8')).plans;
+const editorPlans = new Map();
+const planFor = (def) => editorPlans.get(def.id) ?? OSM_PLANS[def.id]?.plan ?? OSM_PLANS[def.osmId]?.plan ?? null;
+
+function add(def) {
+  if (mallById.has(def.id)) return;
+  defs.set(def.id, def);
+  register(buildMall(def, planFor(def)));
+}
+
+function rebuild(id) {
+  const def = defs.get(id);
+  if (!def) return;
+  unregister(id);
+  add(def);
+  syncedAt = 0; // re-apply seller edits to the new stores
+}
+
+let plansAt = 0;
+async function syncPlans() {
+  for (const { mallId, plan, at } of await db.plans(plansAt)) {
+    plansAt = Math.max(plansAt, at);
+    editorPlans.set(mallId, plan);
+    if (mallById.has(mallId)) rebuild(mallId);
+  }
+}
+await syncPlans();
+
 // Every mall, passage and bazaar in Tehran, with the shops mapped inside them.
 const SNAPSHOT = JSON.parse(readFileSync(new URL('./data/tehran.json', import.meta.url), 'utf8'));
 const [bs, bw, bn, be] = SNAPSHOT.bbox.split(',').map(Number);
 const inSnapshot = (lat, lng) => lat > bs && lat < bn && lng > bw && lng < be;
-for (const def of mergeCurated(SNAPSHOT.malls)) register(buildMall(def));
+for (const def of mergeCurated(SNAPSHOT.malls)) add(def);
+// Malls elsewhere in Iran that have a real floor plan in OpenStreetMap.
+for (const { mall } of Object.values(OSM_PLANS)) if (!mallById.has(mall.id) && !inSnapshot(mall.lat, mall.lng)) add(mall);
 
 // Malls found on OpenStreetMap outside Tehran (by any instance) are kept in the db and rebuilt here.
 let discoveredCount = 0;
 async function syncDiscovered() {
   const defs = await db.discovered(discoveredCount);
   discoveredCount += defs.length;
-  for (const def of defs) if (!inSnapshot(def.lat, def.lng)) register(buildMall(def));
+  for (const def of defs) if (!inSnapshot(def.lat, def.lng)) add(def);
   return defs.length;
 }
 await syncDiscovered();
@@ -79,6 +120,7 @@ async function syncOverrides() {
   if (Date.now() - syncedAt < 3000) return;
   syncedAt = Date.now();
   await syncDiscovered();
+  await syncPlans();
   const overrides = await db.overrides();
   for (const [id, b] of base) {
     const { store } = storeById.get(id);
@@ -206,6 +248,7 @@ function mallSummary(m) {
   return {
     id: m.id, name: m.name, nameEn: m.nameEn || null, lat: m.lat, lng: m.lng, kind: m.kind ?? 'mall',
     outline: !!m.rings?.length, curated: m.curated || undefined, discovered: m.discovered || undefined,
+    plan: m.plan?.source ?? null, mapped: m.plan ? m.floors.filter((f) => !f.unmapped).length : 0,
     area: m.neighbourhood ?? null, street: m.street ?? null, address: m.address ?? null, description: m.description ?? null,
     hours: m.hours, phone: m.phone ?? null, website: m.website ?? null, instagram: m.instagram ?? null,
     floors: m.floors.map((f) => ({ id: f.id, name: f.name, type: f.type })),
@@ -312,12 +355,12 @@ function send(res, status, body) {
   res.end(data);
 }
 
-async function readBody(req) {
+async function readBody(req, max = 64 * 1024) {
   let size = 0;
   const chunks = [];
   for await (const c of req) {
     size += c.length;
-    if (size > 64 * 1024) throw Object.assign(new Error('Payload too large'), { status: 413 });
+    if (size > max) throw Object.assign(new Error('Payload too large'), { status: 413 });
     chunks.push(c);
   }
   try {
@@ -350,6 +393,43 @@ function normalizePhone(p) {
 async function withOffers(list) {
   const offers = await db.offers(list.map((r) => r.id));
   return list.map((r) => ({ ...r, offers: offers.filter((o) => o.requestId === r.id) }));
+}
+
+// ---------- floor plans from the editor ----------
+
+// Saving a plan needs this key when it's set (EDITOR_KEY env var); without it anyone could redraw a mall.
+const EDITOR_KEY = process.env.EDITOR_KEY || '';
+const POINTS = new Set(['entrance', 'elevator', 'stairs', 'escalator', 'wc', 'prayer', 'atm', 'info', 'foodcourt', 'kids', 'firstaid', 'fireexit']);
+const FLOOR_ID = /^(P[1-9]|B[1-9]|G|[1-9]\d?)$/;
+
+// Keep only well-formed geometry near the mall, with bounded sizes.
+function cleanPlan(body, mall) {
+  if (!Array.isArray(body?.floors) || !body.floors.length || body.floors.length > 20) return null;
+  const near = (lat, lng) => Math.abs(lat - mall.lat) < 0.03 && Math.abs(lng - mall.lng) < 0.03;
+  const ring = (r) => (Array.isArray(r) && r.length >= 3 && r.length <= 400
+    && r.every((p) => Array.isArray(p) && num(p[0], -90, 90) != null && num(p[1], -180, 180) != null && near(p[0], p[1]))
+    ? r.map(([lat, lng]) => [Math.round(lat * 1e7) / 1e7, Math.round(lng * 1e7) / 1e7]) : null);
+  const floors = [];
+  for (const f of body.floors) {
+    if (!FLOOR_ID.test(f?.id) || floors.some((x) => x.id === f.id)) return null;
+    const units = (f.units ?? []).slice(0, 3000).map((u) => {
+      const r = ring(u?.ring);
+      if (!r || !/^[\w-]{1,40}$/.test(u.uid ?? '')) return null;
+      const category = CATEGORIES[u.category] && u.category !== 'vacant' ? u.category : null;
+      return {
+        uid: u.uid, ring: r, name: clean(u.name, 60) || null, category,
+        phone: clean(u.phone, 20) || null, hours: clean(u.hours, 30) || null,
+      };
+    }).filter(Boolean);
+    const areas = (f.areas ?? []).slice(0, 500).map((a) => {
+      const r = ring(a?.ring);
+      return r && ['void', 'service', 'seating'].includes(a.kind) ? { kind: a.kind, ring: r } : null;
+    }).filter(Boolean);
+    const points = (f.points ?? []).slice(0, 1000).map((p) => (POINTS.has(p?.type) && num(p.lat, -90, 90) != null && num(p.lng, -180, 180) != null && near(p.lat, p.lng)
+      ? { type: p.type, lat: p.lat, lng: p.lng, ...(p.type === 'escalator' ? { dir: p.dir === 'down' ? 'down' : 'up' } : {}) } : null)).filter(Boolean);
+    floors.push({ id: f.id, name: clean(f.name, 30) || undefined, units, areas, points });
+  }
+  return { source: 'editor', updated: new Date().toISOString(), floors };
 }
 
 // ---------- routes ----------
@@ -387,6 +467,28 @@ async function api(req, res, url) {
   if (method === 'GET' && parts[0] === 'footprint' && mallById.has(parts[1])) {
     const m = mallById.get(parts[1]);
     return send(res, 200, m.rings?.length ? { lat: m.lat, lng: m.lng, rings: m.rings } : { none: true, lat: m.lat, lng: m.lng });
+  }
+  // Floor plan editor: the mall's outline, its current plan and the shops OpenStreetMap knows inside it.
+  if (parts[0] === 'plans' && mallById.has(parts[1])) {
+    const m = mallById.get(parts[1]);
+    const def = defs.get(m.id);
+    if (method === 'GET') {
+      const plan = editorPlans.get(m.id) ?? OSM_PLANS[m.id]?.plan ?? OSM_PLANS[def?.osmId]?.plan ?? null;
+      return send(res, 200, {
+        mall: { id: m.id, name: m.name, lat: m.lat, lng: m.lng, rings: m.rings ?? [], floors: m.floors.map((f) => ({ id: f.id, name: f.name, level: f.level })) },
+        plan, source: editorPlans.has(m.id) ? 'editor' : plan ? 'osm' : null,
+        shops: (def?.stores ?? []).map(({ name, category, floor, lat, lng }) => ({ name, category, floor, lat, lng })),
+      });
+    }
+    if (method === 'POST') {
+      if (EDITOR_KEY && req.headers['x-editor-key'] !== EDITOR_KEY) return send(res, 403, { error: 'کلید ویرایشگر درست نیست' });
+      const plan = cleanPlan(await readBody(req, 2 * 1024 * 1024), m);
+      if (!plan) return send(res, 400, { error: 'نقشه نامعتبر است' });
+      await db.setPlan(m.id, plan);
+      editorPlans.set(m.id, plan);
+      rebuild(m.id);
+      return send(res, 200, mallSummary(mallById.get(m.id)));
+    }
   }
   // Outlines of every mall near a point, for "am I inside a mall?" (passages in Amin Hozour are 30 m apart).
   if (method === 'GET' && parts[0] === 'footprints') {
@@ -577,6 +679,7 @@ async function serveStatic(req, res, url) {
   let rel = decodeURIComponent(url.pathname);
   if (rel === '/') rel = '/index.html';
   if (rel === '/seller') rel = '/seller.html';
+  if (rel === '/editor') rel = '/editor.html';
   const file = path.normalize(path.join(PUBLIC, rel));
   if (!file.startsWith(PUBLIC + path.sep)) return send(res, 403, { error: 'Forbidden' });
   try {

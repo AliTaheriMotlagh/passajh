@@ -2,7 +2,7 @@
 // App files are network-first (always fresh when online); CDN libraries and fonts are
 // stale-while-revalidate. The API and map tiles are never cached.
 
-const CACHE = 'passajh-v3';
+const CACHE = 'passajh-v4';
 const SHELL = [
   '/', '/css/app.css', '/js/app.js', '/js/city.js', '/js/mall.js', '/js/geo.js', '/js/ui.js', '/js/state.js',
   '/js/parking.js', '/js/shopping.js', '/js/friends.js', '/shared/catalog.js', '/shared/text.js', '/shared/frame.js',

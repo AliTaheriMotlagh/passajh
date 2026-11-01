@@ -401,7 +401,7 @@ export class CityView {
         return `
         <div class="mall-item ${m.id === this.selected ? 'active' : ''}" data-id="${m.id}">
           <div class="row"><b>${esc(m.name)}</b>${m.id === this.here ? '<span class="chip green">📍 اینجا هستید</span>' : d != null ? `<span class="dist">${fmtDist(d)}</span>` : ''}</div>
-          <div class="meta">${sub}${st ? ` · <span class="${st.open ? 'open' : 'closed'}">${st.text}</span>` : ''}${m.discounts ? ` · <span class="chip">${fa(m.discounts)} تخفیف</span>` : ''}</div>
+          <div class="meta">${sub}${st ? ` · <span class="${st.open ? 'open' : 'closed'}">${st.text}</span>` : ''}${m.plan ? ' · <span class="chip green">نقشه واقعی</span>' : ''}${m.discounts ? ` · <span class="chip">${fa(m.discounts)} تخفیف</span>` : ''}</div>
         </div>`;
       }).join('')}`;
     for (const el of $$('.mall-item')) el.addEventListener('click', () => this.select(el.dataset.id));
@@ -439,6 +439,7 @@ export class CityView {
       ${d != null ? `<div class="sub dist-line">${m.id === this.here ? '📍 الان اینجا هستید' : `📏 ${fmtDist(d)} از شما · 🚗 حدود ${fmtDuration(estimate(d, 'car'))}${d < 4000 ? ` · 🚶 ${fmtDuration(estimate(d, 'foot'))}` : ''}`}</div>` : ''}
       <div class="facts">
         <span>🏬 ${fa(m.floors.length)} طبقه</span>
+        ${m.plan ? `<span class="good-text">🗺️ نقشه داخلی واقعی${m.mapped < m.floors.length ? ` (${fa(m.mapped)} طبقه)` : ''}</span>` : ''}
         <span>🛍️ ${m.stores ? `${fa(m.stores)} فروشگاه ثبت‌شده` : 'فروشگاهی ثبت نشده'}</span>
         ${m.discounts ? `<span class="deal-text">🏷️ ${fa(m.discounts)} تخفیف</span>` : ''}
         ${m.hours ? `<span>🕘 ${fa(m.hours)}</span>` : ''}
@@ -453,7 +454,7 @@ export class CityView {
       <div class="ext-links">باز کردن در: ${externalNav(m, m.name).map((x) => `<a target="_blank" rel="noopener" href="${esc(x.href)}">${esc(x.label)}</a>`).join(' · ')}
         ${insta ? ` · <a target="_blank" rel="noopener" href="https://instagram.com/${encodeURIComponent(insta)}">اینستاگرام</a>` : ''}
         ${m.website ? ` · <a target="_blank" rel="noopener" href="${esc(/^https?:/.test(m.website) ? m.website : `https://${m.website}`)}">وب‌سایت</a>` : ''}</div>
-      <div class="source">منبع: OpenStreetMap${m.stores ? '' : ' · فروشنده هستید؟ <a href="/seller">مغازه‌تان را ثبت کنید</a>'}</div>`;
+      <div class="source">منبع: OpenStreetMap${m.stores ? '' : ' · فروشنده هستید؟ <a href="/seller">مغازه‌تان را ثبت کنید</a>'} · <a href="/editor#${encodeURIComponent(m.id)}">${m.plan ? 'ویرایش نقشه داخلی' : 'کشیدن نقشه داخلی'}</a></div>`;
     $('#card-enter').addEventListener('click', () => this.onEnter(m.id));
     $('#card-close').addEventListener('click', () => {
       card.classList.add('hidden');
