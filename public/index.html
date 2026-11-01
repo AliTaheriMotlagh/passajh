@@ -3,114 +3,34 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-  <meta name="theme-color" content="#0b1118">
-  <meta name="description" content="نقشه زنده مراکز خرید ایران: مسیریابی، نقشه داخلی طبقات، تخفیف‌ها، پارکینگ و درخواست کالا">
+  <meta name="theme-color" content="#f6f4ef" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#12110e" media="(prefers-color-scheme: dark)">
+  <meta name="description" content="کجا بخرم؟ راسته‌ها، پاساژها و مراکز خرید تهران: هر جنسی را کجا بخرید، ساعت کاری، نزدیک‌ترین مترو و مغازه‌ها.">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="پاساژ">
   <meta name="format-detection" content="telephone=no">
-  <title>پاساژ — نقشه مراکز خرید ایران</title>
+  <title>پاساژ — کجا بخرم؟</title>
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/icon-180.png">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;600;700;800;900&display=swap">
-  <link rel="preconnect" href="https://tiles.openfreemap.org" crossorigin>
-  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+  <link rel="preload" href="/fonts/vazirmatn-33.0.3.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/css/app.css">
 </head>
 <body>
-  <div id="splash" class="splash" aria-hidden="true"><div class="splash-logo">پاساژ<small>PASSAJH</small></div></div>
+  <header class="app-header" id="header"></header>
+  <main id="view" tabindex="-1"></main>
 
-  <!-- City view -->
-  <section id="city-view" class="view">
-    <div id="city-map"></div>
-    <header class="topbar">
-      <div class="brand">پاساژ<small>PASSAJH · IRAN</small></div>
-      <div class="search">
-        <input id="city-search" type="search" autocomplete="off" enterkeyhint="search" placeholder="پاساژ، فروشگاه یا کالا… علاءالدین، موبایل، مانتو" aria-label="جستجوی پاساژ، فروشگاه یا کالا">
-        <div id="city-results" class="results hidden"></div>
-      </div>
-      <button class="btn primary" data-action="request">📣 <span class="hide-sm">درخواست کالا</span></button>
-      <button class="btn icon-lg" data-action="hub" aria-label="منوی من">☰<b class="badge hidden" data-count="offers"></b></button>
-    </header>
-    <nav id="city-chips" class="area-chips" aria-label="محله‌های خرید"></nav>
-    <div class="share-indicator hidden" data-action="friends">📡 موقعیت شما برای گروه نمایش داده می‌شود</div>
-    <div id="discover-chip" class="discover-chip hidden"><span class="spinner"></span> جستجوی مراکز خرید این منطقه…</div>
-    <div id="nav-panel" class="nav-panel hidden" aria-live="polite"></div>
-    <aside id="mall-list" class="panel sheet"></aside>
-    <div id="mall-card" class="panel hidden"></div>
-    <div class="fabs">
-      <button id="btn-layer" class="fab small" title="ماهواره" aria-label="نقشه یا ماهواره">🛰️</button>
-      <button id="btn-park" class="fab" title="ماشینم را اینجا پارک کردم" aria-label="پارک ماشین">🚗</button>
-      <button id="btn-locate" class="fab" title="موقعیت من" aria-label="موقعیت من"><span class="locate-ico"></span></button>
-    </div>
-  </section>
+  <nav class="tabbar" aria-label="بخش‌ها">
+    <a href="#/" data-tab="home"><span class="ico" aria-hidden="true">🏠</span>خانه</a>
+    <a href="#/map" data-tab="map"><span class="ico" aria-hidden="true">🗺️</span>نقشه</a>
+    <a href="#/list" data-tab="list"><span class="ico" aria-hidden="true">📝</span>لیست خرید<b class="dot hidden" id="list-count"></b></a>
+    <a href="#/me" data-tab="me"><span class="ico" aria-hidden="true">👤</span>من</a>
+  </nav>
 
-  <!-- Mall view -->
-  <section id="mall-view" class="view hidden">
-    <canvas id="mall-canvas" aria-label="نقشه داخلی پاساژ"></canvas>
-    <header class="topbar">
-      <button class="btn icon-lg" id="btn-back" title="بازگشت به نقشه شهر" aria-label="بازگشت">→</button>
-      <div class="brand mall-title" id="mall-title"></div>
-      <div class="search">
-        <input id="mall-search" type="search" autocomplete="off" enterkeyhint="search" placeholder="جستجوی کالا یا فروشگاه در این پاساژ…" aria-label="جستجو در پاساژ">
-        <div id="mall-results" class="results hidden"></div>
-      </div>
-      <button class="btn" id="btn-discounts" aria-label="تخفیف‌ها">🏷️ <span class="hide-sm">تخفیف‌ها</span></button>
-      <button class="btn hide-sm" id="btn-legend">🗺️ راهنما</button>
-      <button class="btn primary hide-sm" data-action="request">📣 درخواست کالا</button>
-      <button class="btn icon-lg" data-action="hub" aria-label="منوی من">☰<b class="badge hidden" data-count="offers"></b></button>
-    </header>
-    <nav id="quick-bar" class="quick-bar" aria-label="امکانات نزدیک"></nav>
-    <div class="share-indicator hidden" data-action="friends">📡 موقعیت شما برای گروه نمایش داده می‌شود</div>
-
-    <div class="hud">
-      <div id="hud-money" class="hud-money"></div>
-      <button id="park-chip" class="park-chip hidden" data-action="parking"></button>
-    </div>
-    <div id="help-box" class="help-box hidden" role="status"></div>
-    <div id="route-hint" class="route-hint hidden" aria-live="polite"></div>
-
-    <nav id="floor-picker" class="floor-picker" aria-label="طبقات"></nav>
-
-    <div class="radar-wrap">
-      <canvas id="radar" aria-hidden="true"></canvas>
-      <div id="location-text" class="location-text"></div>
-    </div>
-
-    <div class="map-tools">
-      <button class="tool" id="btn-gps" title="موقعیت واقعی من" aria-label="موقعیت واقعی من">📡</button>
-      <button class="tool" id="btn-center" title="مرکز روی من" aria-label="مرکز روی من">◎</button>
-      <button class="tool" id="btn-car" title="ماشین من" aria-label="ماشین من">🚗</button>
-      <button class="tool zoom" id="btn-zoom-in" title="بزرگنمایی" aria-label="بزرگنمایی">+</button>
-      <button class="tool zoom" id="btn-zoom-out" title="کوچک‌نمایی" aria-label="کوچک‌نمایی">−</button>
-      <button class="tool" id="btn-full" title="نقشه کامل طبقه (M)" aria-label="نقشه کامل">⛶</button>
-      <button class="tool show-sm" onclick="document.getElementById('btn-legend').click()" aria-label="راهنمای نقشه">🗺️</button>
-    </div>
-
-    <div id="joystick" class="joystick" aria-hidden="true"><div class="stick"></div></div>
-    <div class="controls-hint hide-sm">WASD / ← ↑ → ↓ حرکت · Shift دویدن · کلیک روی راهرو: برو آنجا · کلیک روی مغازه: محصولات · M نقشه کامل</div>
-
-    <aside id="store-panel" class="drawer hidden"></aside>
-    <aside id="legend" class="drawer hidden"></aside>
-    <aside id="discounts-panel" class="drawer hidden"></aside>
-    <div id="fade" class="fade"></div>
-  </section>
-
-  <!-- Shared -->
-  <div id="modal" class="modal hidden" role="dialog" aria-modal="true"><div class="modal-box" id="modal-box"></div></div>
-  <aside id="myreq-panel" class="drawer hidden"></aside>
-  <aside id="hub-panel" class="drawer hidden"></aside>
-  <aside id="list-panel" class="drawer hidden"></aside>
-  <aside id="favs-panel" class="drawer hidden"></aside>
-  <aside id="friends-panel" class="drawer hidden"></aside>
-  <aside id="parking-panel" class="drawer hidden"></aside>
+  <div id="offline" class="offline hidden">آفلاین هستید · اطلاعات ذخیره‌شده نمایش داده می‌شود</div>
   <div id="toasts" class="toasts" aria-live="polite"></div>
-
-  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
   <script type="module" src="/js/app.js"></script>
 </body>
 </html>

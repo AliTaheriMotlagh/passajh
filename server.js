@@ -1,23 +1,23 @@
-// Passajh server: static files, mall/store API, product requests and live notifications (SSE).
-// Run with `node server.js`. Stores data in data/db.json, or in Neon Postgres when DATABASE_URL is set.
-// Tehran's malls come from the OpenStreetMap snapshot in data/tehran.json (`npm run data` refreshes it).
+// Passajh server: static files and the API behind "where in Tehran do I go to buy X?".
+// Run with `node server.js`. Reads the OpenStreetMap snapshots in data/ (malls and the shops mapped inside
+// them, shopping streets, metro stations, real floor plans) and stores what people add (shops, votes,
+// floor plans) in data/db.json, or in Neon Postgres when DATABASE_URL is set.
 
 import http from 'node:http';
-import { stat } from 'node:fs/promises';
-import { existsSync, readFileSync, createReadStream } from 'node:fs';
+import { stat, readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
-import { setTimeout as sleep } from 'node:timers/promises';
-import { buildMall, discoveredDef, mergeCurated } from './lib/seed.js';
+import { mergeCurated, discoveredDef, floorsOf } from './lib/malls.js';
 import { openDb } from './lib/db.js';
-import { CATEGORIES } from './public/shared/catalog.js';
-import { tokens, matchScore, toLatinDigits } from './public/shared/text.js';
+import { CATEGORIES, categoryOfKind } from './public/shared/catalog.js';
+import { tokens, matchScore, norm, toLatinDigits } from './public/shared/text.js';
+import { floorName, levelOf, FLOOR_ID } from './public/shared/floors.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, 'public');
-const LAYOUTS = path.join(ROOT, 'data', 'layouts');
 // Vercel's filesystem is read-only except /tmp (which is per-instance and not persistent).
 const DATA = process.env.DATA_DIR || (process.env.VERCEL ? '/tmp/passajh' : path.join(ROOT, 'data'));
 const PORT = Number(process.env.PORT) || 4000;
@@ -26,110 +26,254 @@ const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.webmanifest': 'application/manifest+json',
+  '.woff2': 'font/woff2',
 };
 
-// ---------- data ----------
+const load = (file) => JSON.parse(readFileSync(path.join(ROOT, 'data', file), 'utf8'));
+const SNAPSHOT = load('tehran.json');
+const OSM_PLANS = load('plans-osm.json').plans;
+const STATIONS = load('metro.json').stations;
+const HOTSPOTS = load('hotspots.json');
 
 const db = await openDb({ dir: DATA });
 
-const malls = [];
-const mallById = new Map();
-const storeById = new Map(); // id -> { store, mall, floor }
-// Original profile, discount and product count per store, so seller edits can be re-applied from scratch.
-const base = new Map();
-const PROFILE = ['name', 'category', 'phone', 'hours', 'instagram', 'vacant', 'claimed'];
+// ---------- geometry ----------
 
-const defs = new Map(); // mall id -> the definition it was built from, for rebuilding when its plan changes
+const IRAN = { s: 25, w: 44, n: 40, e: 63.5 };
+const inIran = (lat, lng) => lat > IRAN.s && lat < IRAN.n && lng > IRAN.w && lng < IRAN.e;
+const [bs, bw, bn, be] = SNAPSHOT.bbox.split(',').map(Number);
+const inSnapshot = (lat, lng) => lat > bs && lat < bn && lng > bw && lng < be;
 
-function register(mall) {
-  if (mallById.has(mall.id)) return;
-  // A surveyed floor plan in data/layouts/<mallId>.json replaces the generated one.
-  const file = path.join(LAYOUTS, `${mall.id}.json`);
-  if (existsSync(file)) mall.floors = JSON.parse(readFileSync(file, 'utf8')).floors;
-  malls.push(mall);
-  mallById.set(mall.id, mall);
-  for (const floor of mall.floors) {
-    for (const store of floor.stores) {
-      storeById.set(store.id, { store, mall, floor });
-      base.set(store.id, {
-        discount: store.discount, products: store.products.length,
-        profile: Object.fromEntries(PROFILE.map((k) => [k, store[k] ?? null])),
-      });
-    }
-  }
+function haversine(a, b) {
+  const rad = Math.PI / 180;
+  const h = Math.sin(((b.lat - a.lat) * rad) / 2) ** 2
+    + Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(((b.lng - a.lng) * rad) / 2) ** 2;
+  return 12742000 * Math.asin(Math.sqrt(h));
 }
 
-function unregister(id) {
-  const old = mallById.get(id);
-  if (!old) return;
-  for (const f of old.floors) for (const s of f.stores) { storeById.delete(s.id); base.delete(s.id); }
-  malls.splice(malls.indexOf(old), 1);
-  mallById.delete(id);
+// Metro stations within walking distance of a point, nearest first.
+function stationsNear(p, n = 2, max = 1500) {
+  return STATIONS.map((s) => ({ name: s.name, lines: s.lines, m: Math.round(haversine(p, s) / 10) * 10 }))
+    .filter((s) => s.m <= max).sort((a, b) => a.m - b.m).slice(0, n);
 }
+
+const hotspots = HOTSPOTS.hotspots.map((h) => ({ ...h, metro: stationsNear(h, 1)[0] ?? null }));
+
+// ---------- malls and shops ----------
+
+const malls = new Map(); // id -> mall
+const shopIndex = new Map(); // shop id -> mall id
+const defs = new Map(); // mall id -> the snapshot/discovered definition, for the editor
+let version = 1; // bumped on every change, so clients can revalidate the boot data cheaply
 
 // Real floor plans: drawn in the editor (db) win over OpenStreetMap indoor mapping (data/plans-osm.json).
-const OSM_PLANS = JSON.parse(readFileSync(new URL('./data/plans-osm.json', import.meta.url), 'utf8')).plans;
 const editorPlans = new Map();
 const planFor = (def) => editorPlans.get(def.id) ?? OSM_PLANS[def.id]?.plan ?? OSM_PLANS[def.osmId]?.plan ?? null;
 
-function add(def) {
-  if (mallById.has(def.id)) return;
+// A shop mapped in OpenStreetMap inside the mall's outline. The category is re-derived from the raw tag.
+function osmShop(mallId, s) {
+  return {
+    id: `${mallId}-${s.osm}`, name: s.name, brand: s.brand || null,
+    category: s.kind ? categoryOfKind(s.kind) : 'other', floor: s.floor || null,
+    phone: s.phone || null, hours: s.hours || null, website: s.website || null, instagram: s.instagram || null,
+    keywords: null, source: 'osm',
+  };
+}
+
+function addMall(def) {
+  if (malls.has(def.id)) return;
   defs.set(def.id, def);
-  register(buildMall(def, planFor(def)));
+  const mall = {
+    id: def.id, name: def.name, nameEn: def.nameEn || null, kind: def.kind ?? 'mall',
+    lat: def.lat, lng: def.lng, rings: def.rings ?? [], hood: def.neighbourhood ?? null,
+    street: def.street ?? null, address: def.address ?? null, description: def.description ?? null,
+    hours: def.hours ?? null, openingHours: def.openingHours ?? null, phone: def.phone ?? null,
+    website: def.website ?? null, instagram: def.instagram ?? null, wheelchair: def.wheelchair ?? null,
+    levels: def.levels ?? null, curated: !!def.curated, discovered: !!def.discovered,
+    food: !!def.food, cinema: !!def.cinema,
+    metro: stationsNear(def),
+    base: (def.stores ?? []).filter((s) => s.name).map((s) => osmShop(def.id, s)),
+    shops: [], tags: {}, reports: {},
+  };
+  setPlan(mall, planFor(def));
+  malls.set(mall.id, mall);
+  refresh(mall);
 }
 
-function rebuild(id) {
-  const def = defs.get(id);
-  if (!def) return;
-  unregister(id);
-  add(def);
-  syncedAt = 0; // re-apply seller edits to the new stores
+function setPlan(mall, plan) {
+  mall.plan = plan?.floors?.some((f) => f.units?.length) ? plan : null;
+  mall.floors = floorsOf(defs.get(mall.id), mall.plan);
 }
 
-let plansAt = 0;
-async function syncPlans() {
+// ---------- contributions ----------
+
+const edits = new Map(); // mall id -> Map(shop id -> { mallId, data, tokenHash, at })
+const votes = new Map(); // target ("shop:<id>" | "mall:<id>") -> Map(key -> { kind, value, at })
+const sha = (s) => createHash('sha256').update(String(s)).digest('hex');
+// Public id for a device, so the private id (which authorizes votes) never leaks.
+const publicId = (userId) => sha(`passajh:${userId}`).slice(0, 16);
+
+// The mall's shops: the mapped ones with their owners' edits, plus the ones people added.
+function refresh(mall) {
+  const own = edits.get(mall.id) ?? new Map();
+  const shops = mall.base.map((b) => (own.has(b.id) ? merge(b, own.get(b.id)) : b));
+  for (const [id, e] of own) if (!mall.base.some((b) => b.id === id)) shops.push(merge({ id, source: 'user' }, e));
+  mall.shops = shops.filter((s) => !s.removed);
+  for (const s of mall.shops) {
+    shopIndex.set(s.id, mall.id);
+    const v = tally(`shop:${s.id}`);
+    s.here = v.here ?? 0;
+    s.gone = v.gone ?? 0;
+  }
+
+  const t = tally(`mall:${mall.id}`, true);
+  mall.tags = Object.fromEntries(Object.entries(t).filter(([k]) => k.startsWith('tag:')).map(([k, n]) => [k.slice(4), n]));
+  mall.reports = { closed: t.closed ?? 0, hours: t.hoursTop ?? null, friday: { open: t['fri:open'] ?? 0, closed: t['fri:closed'] ?? 0 } };
+}
+
+function merge(base, e) {
+  const d = e.data;
+  return {
+    ...base, ...d, id: base.id, source: e.tokenHash ? 'owner' : base.source,
+    at: new Date(e.at).toISOString(),
+  };
+}
+
+// Counts of the live votes on a target: { here, gone } for a shop; { 'tag:mobile', closed, 'fri:open', hoursTop }
+// for a mall.
+function tally(target, mall = false) {
+  const out = {};
+  const hours = {};
+  for (const v of votes.get(target)?.values() ?? []) {
+    if (v.value == null || v.value === false) continue;
+    if (v.kind === 'hours') {
+      const key = `${v.value.open} تا ${v.value.close}`;
+      if (v.value.open) hours[key] = (hours[key] || 0) + 1;
+      if (v.value.friday) out[`fri:${v.value.friday}`] = (out[`fri:${v.value.friday}`] || 0) + 1;
+    } else {
+      out[v.kind] = (out[v.kind] || 0) + 1;
+    }
+  }
+  if (mall) {
+    const top = Object.entries(hours).sort((a, b) => b[1] - a[1])[0];
+    if (top) out.hoursTop = { text: top[0], count: top[1] };
+  }
+  return out;
+}
+
+// Contributions can be made on another server instance, so re-read changes from the db every few seconds.
+let syncedAt = 0, seenAt = 0, discoveredCount = 0, plansAt = 0;
+async function sync(force = false) {
+  if (!force && Date.now() - syncedAt < 3000) return;
+  syncedAt = Date.now();
+  const { edits: e, votes: v } = await db.changes(seenAt);
+  const touched = new Set();
+  for (const x of e) {
+    if (!edits.has(x.mallId)) edits.set(x.mallId, new Map());
+    if (edits.get(x.mallId).get(x.shopId)?.at === x.at) continue;
+    edits.get(x.mallId).set(x.shopId, x);
+    touched.add(x.mallId);
+    seenAt = Math.max(seenAt, x.at);
+  }
+  for (const x of v) {
+    if (!votes.has(x.target)) votes.set(x.target, new Map());
+    if (votes.get(x.target).get(x.key)?.at === x.at) continue;
+    votes.get(x.target).set(x.key, x);
+    const [type, id] = [x.target.slice(0, 4), x.target.slice(5)];
+    touched.add(type === 'mall' ? id : shopIndex.get(id));
+    seenAt = Math.max(seenAt, x.at);
+  }
+  for (const def of await db.discovered(discoveredCount)) {
+    discoveredCount++;
+    if (!inSnapshot(def.lat, def.lng)) { addMall(def); version++; }
+  }
   for (const { mallId, plan, at } of await db.plans(plansAt)) {
     plansAt = Math.max(plansAt, at);
     editorPlans.set(mallId, plan);
-    if (mallById.has(mallId)) rebuild(mallId);
+    const m = malls.get(mallId);
+    if (m) { setPlan(m, plan); version++; }
   }
+  for (const id of touched) if (malls.has(id)) refresh(malls.get(id));
+  if (touched.size) version++;
 }
-await syncPlans();
 
-// Every mall, passage and bazaar in Tehran, with the shops mapped inside them.
-const SNAPSHOT = JSON.parse(readFileSync(new URL('./data/tehran.json', import.meta.url), 'utf8'));
-const [bs, bw, bn, be] = SNAPSHOT.bbox.split(',').map(Number);
-const inSnapshot = (lat, lng) => lat > bs && lat < bn && lng > bw && lng < be;
-for (const def of mergeCurated(SNAPSHOT.malls)) add(def);
-// Malls elsewhere in Iran that have a real floor plan in OpenStreetMap.
-for (const { mall } of Object.values(OSM_PLANS)) if (!mallById.has(mall.id) && !inSnapshot(mall.lat, mall.lng)) add(mall);
+// Tehran from the snapshot, the curated big malls, and malls elsewhere in Iran with a real floor plan.
+for (const { mallId, plan, at } of await db.plans(0)) { editorPlans.set(mallId, plan); plansAt = Math.max(plansAt, at); }
+for (const def of mergeCurated(SNAPSHOT.malls)) addMall(def);
+for (const { mall } of Object.values(OSM_PLANS)) if (!malls.has(mall.id) && !inSnapshot(mall.lat, mall.lng)) addMall(mall);
+await sync(true);
+for (const m of malls.values()) refresh(m);
 
-// Malls found on OpenStreetMap outside Tehran (by any instance) are kept in the db and rebuilt here.
-let discoveredCount = 0;
-async function syncDiscovered() {
-  const defs = await db.discovered(discoveredCount);
-  discoveredCount += defs.length;
-  for (const def of defs) if (!inSnapshot(def.lat, def.lng)) add(def);
-  return defs.length;
+// ---------- what the client sees ----------
+
+// The mall's shops by category (a shop most visitors say is gone doesn't count).
+function categoriesOf(m) {
+  const c = {};
+  for (const s of m.shops) if (s.gone < 2 || s.here >= s.gone) c[s.category] = (c[s.category] || 0) + 1;
+  return c;
 }
-await syncDiscovered();
 
-// Seller edits can be made on another server instance, so re-read them from the db every few seconds.
-let syncedAt = 0;
-async function syncOverrides() {
-  if (Date.now() - syncedAt < 3000) return;
-  syncedAt = Date.now();
-  await syncDiscovered();
-  await syncPlans();
-  const overrides = await db.overrides();
-  for (const [id, b] of base) {
-    const { store } = storeById.get(id);
-    const o = overrides[id];
-    Object.assign(store, b.profile, o?.profile ? { ...o.profile, vacant: false, claimed: true } : {});
-    store.discount = o && 'discount' in o ? o.discount : b.discount;
-    store.products.length = b.products;
-    if (o?.products) store.products.push(...o.products);
+function summary(m) {
+  const reported = !m.hours && m.reports.hours?.count >= 1;
+  return {
+    id: m.id, name: m.name, nameEn: m.nameEn, kind: m.kind, lat: m.lat, lng: m.lng, hood: m.hood,
+    hours: m.hours ?? (reported ? m.reports.hours.text : null), hoursBy: m.hours ? 'osm' : reported ? 'users' : null,
+    shops: m.shops.length, cats: categoriesOf(m), tags: Object.keys(m.tags).length ? m.tags : undefined, metro: m.metro[0] ?? null,
+    curated: m.curated || undefined, plan: !!m.plan || undefined, phone: !!m.phone || undefined,
+    closed: m.reports.closed >= 2 || undefined, discovered: m.discovered || undefined,
+    fri: m.reports.friday.closed > m.reports.friday.open ? 'closed' : m.reports.friday.open ? 'open' : undefined,
+  };
+}
+
+function shopOut(s) {
+  const { removed, by, ...rest } = s;
+  return rest;
+}
+
+function details(m) {
+  return {
+    ...summary(m),
+    rings: m.rings, street: m.street, address: m.address, description: m.description,
+    phone: m.phone, website: m.website, instagram: m.instagram, openingHours: m.openingHours,
+    wheelchair: m.wheelchair, levels: m.levels, food: m.food, cinema: m.cinema,
+    floors: m.floors.map((id) => ({ id, name: floorName(id) })),
+    metroAll: m.metro, reports: m.reports,
+    shops: m.shops.map(shopOut),
+    plan: m.plan && { source: m.plan.source ?? 'osm', updated: m.plan.updated ?? null, floors: m.plan.floors },
+    streets: hotspots.filter((h) => haversine(h, m) < 450).map(({ id, name, category, count }) => ({ id, name, category, count })),
+  };
+}
+
+// The data the app needs to start, cached by the browser for offline use.
+let bootCache = null;
+function boot() {
+  if (bootCache?.version === version) return bootCache;
+  const list = [...malls.values()].filter((m) => !m.discovered).map(summary);
+  const shops = list.reduce((a, m) => a + m.shops, 0);
+  const body = JSON.stringify({
+    version, malls: list, hotspots,
+    stats: {
+      malls: list.length, shops, withShops: list.filter((m) => m.shops).length, streetShops: HOTSPOTS.shops,
+      stations: STATIONS.length, updated: SNAPSHOT.updated,
+    },
+  });
+  bootCache = { version, etag: `"b${version}-${sha(body).slice(0, 10)}"`, gz: gzipSync(body), body };
+  return bootCache;
+}
+
+// Shops whose name, brand or "what we sell" matches the query, across every mall.
+function searchShops(q, limit = 40) {
+  const qt = tokens(q);
+  if (!qt.length) return [];
+  const out = [];
+  for (const m of malls.values()) {
+    for (const s of m.shops) {
+      // A match on the name ranks above one on "what we sell".
+      const score = Math.max(matchScore(qt, `${s.name} ${s.brand ?? ''}`), matchScore(qt, s.keywords ?? '') * 0.95);
+      if (score >= 0.95) out.push({ score, shop: { id: s.id, name: s.name, category: s.category, floor: s.floor, mallId: m.id, mallName: m.name, lat: m.lat, lng: m.lng } });
+    }
   }
+  return out.sort((a, b) => b.score - a.score).slice(0, limit).map((r) => r.shop);
 }
 
 // ---------- malls anywhere in Iran (OpenStreetMap) ----------
@@ -138,8 +282,6 @@ const OVERPASS = process.env.OVERPASS_URL ? [process.env.OVERPASS_URL] : [
   'https://overpass-api.de/api/interpreter', 'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter',
 ];
-const IRAN = { s: 25, w: 44, n: 40, e: 63.5 };
-const inIran = (lat, lng) => lat > IRAN.s && lat < IRAN.n && lng > IRAN.w && lng < IRAN.e;
 const jobs = new Map(); // in-flight OpenStreetMap lookups, so concurrent callers share one
 
 function once(key, fn) {
@@ -151,20 +293,13 @@ function once(key, fn) {
   return jobs.get(key);
 }
 
-function haversine(a, b) {
-  const rad = Math.PI / 180;
-  const h = Math.sin(((b.lat - a.lat) * rad) / 2) ** 2
-    + Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(((b.lng - a.lng) * rad) / 2) ** 2;
-  return 12742000 * Math.asin(Math.sqrt(h));
-}
-
 // Overpass is often unreachable from inside Iran, so the server asks on the browser's behalf.
 async function overpass(q) {
   for (const url of OVERPASS) {
     try {
       const res = await fetch(url, {
         method: 'POST', body: `data=${encodeURIComponent(q)}`, signal: AbortSignal.timeout(30000),
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'passajh/0.2' },
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'passajh/0.3' },
       });
       if (res.ok) return await res.json();
     } catch { /* try the next mirror */ }
@@ -189,138 +324,33 @@ function shape(el) {
 // Register the shopping malls in the 3×3 block of 0.1° tiles (≈ 30 km) around a point.
 // Each tile is fetched from OpenStreetMap once, ever; later calls read the db.
 function discoverAround(lat, lng) {
-  if (inSnapshot(lat, lng)) return Promise.resolve(0); // Tehran is already in the snapshot
+  if (inSnapshot(lat, lng)) return Promise.resolve();
   const ty = Math.floor(lat * 10), tx = Math.floor(lng * 10);
   return once(`tiles:${ty}:${tx}`, async () => {
     const tiles = [];
     for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) tiles.push(`${ty + dy}:${tx + dx}`);
-    if (!(await db.missingTiles(tiles)).length) return syncDiscovered();
+    if (!(await db.missingTiles(tiles)).length) return sync(true);
     const bbox = `${(ty - 1) / 10},${(tx - 1) / 10},${(ty + 2) / 10},${(tx + 2) / 10}`;
     const data = await overpass(`[out:json][timeout:25];(
       nwr["shop"="mall"]["name"](${bbox});
       nwr["amenity"="marketplace"]["name"]["building"](${bbox});
     );out geom;`);
-    const defs = [];
+    const found = [];
     for (const el of data.elements || []) {
       const t = el.tags || {};
       const name = (t['name:fa'] || t.name || '').trim().slice(0, 80);
       if (!name) continue;
       const { rings, lat: clat, lng: clng } = shape(el);
       if (!inIran(clat, clng) || inSnapshot(clat, clng)) continue;
-      defs.push(discoveredDef({
+      found.push(discoveredDef({
         id: `osm-${el.type[0]}${el.id}`, name, nameEn: t['name:en'], lat: clat, lng: clng, rings,
         levels: t['building:levels'], city: t['addr:city'], phone: t.phone || t['contact:phone'],
         hours: t.opening_hours?.match(/(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})/)?.slice(1).join(' تا '),
       }));
     }
-    await db.addDiscovered(defs, tiles);
-    return syncDiscovered();
+    await db.addDiscovered(found, tiles);
+    return sync(true);
   });
-}
-
-function storeHaystack(store) {
-  const cat = CATEGORIES[store.category] ?? CATEGORIES.other;
-  return `${store.name} ${store.nameEn ?? ''} ${store.brand ?? ''} ${cat.label} ${cat.keywords.join(' ')}`;
-}
-
-function storeSummary({ store, mall, floor }) {
-  return {
-    id: store.id, name: store.name, category: store.category, phone: store.phone,
-    discount: store.discount, rating: store.rating,
-    floorId: floor.id, floorName: floor.name, mallId: mall.id, mallName: mall.name,
-  };
-}
-
-// Compact enough to list every mall in Tehran at once; outlines come from /api/footprint/:id.
-function mallSummary(m) {
-  let stores = 0, discounts = 0, products = 0, units = 0;
-  const categories = {};
-  for (const f of m.floors) {
-    for (const s of f.stores) {
-      units++;
-      if (s.vacant) continue;
-      stores++;
-      products += s.products.length;
-      if (s.discount) discounts++;
-      categories[s.category] = (categories[s.category] || 0) + 1;
-    }
-  }
-  return {
-    id: m.id, name: m.name, nameEn: m.nameEn || null, lat: m.lat, lng: m.lng, kind: m.kind ?? 'mall',
-    outline: !!m.rings?.length, curated: m.curated || undefined, discovered: m.discovered || undefined,
-    plan: m.plan?.source ?? null, mapped: m.plan ? m.floors.filter((f) => !f.unmapped).length : 0,
-    area: m.neighbourhood ?? null, street: m.street ?? null, address: m.address ?? null, description: m.description ?? null,
-    hours: m.hours, phone: m.phone ?? null, website: m.website ?? null, instagram: m.instagram ?? null,
-    floors: m.floors.map((f) => ({ id: f.id, name: f.name, type: f.type })),
-    stores, units, discounts, products, categories,
-  };
-}
-
-// Search products across stores, and shops themselves by name/category (most real shops haven't listed
-// products yet; those results have `product: null`). Returns best matches first.
-function searchProducts(q, { mallId, limit = 40, threshold = 1 } = {}) {
-  const qt = tokens(q);
-  if (!qt.length) return [];
-  const out = [];
-  for (const ref of storeById.values()) {
-    if (ref.store.vacant || (mallId && ref.mall.id !== mallId)) continue;
-    const storeScore = matchScore(qt, storeHaystack(ref.store));
-    if (!ref.store.products.length && storeScore >= threshold) out.push({ score: storeScore * 0.9, product: null, store: storeSummary(ref) });
-    for (const p of ref.store.products) {
-      const score = Math.max(matchScore(qt, `${p.name} ${p.tags}`), storeScore * 0.9);
-      if (score >= threshold) out.push({ score, product: p, store: storeSummary(ref) });
-    }
-  }
-  out.sort((a, b) => b.score - a.score || (a.product?.price ?? Infinity) - (b.product?.price ?? Infinity));
-  return out.slice(0, limit);
-}
-
-// Stores that should be notified about a request: those holding a matching product
-// (or whose category matches the query).
-function matchStores(q, mallIds) {
-  const qt = tokens(q);
-  const result = new Map();
-  for (const ref of storeById.values()) {
-    if (ref.store.vacant || (mallIds && !mallIds.has(ref.mall.id))) continue;
-    let best = matchScore(qt, storeHaystack(ref.store)) >= 1 ? 0.9 : 0;
-    const products = [];
-    for (const p of ref.store.products) {
-      const s = matchScore(qt, `${p.name} ${p.tags}`);
-      if (s >= 0.5) products.push(p.id);
-      best = Math.max(best, s);
-    }
-    if (best >= 0.5) result.set(ref.store.id, { storeId: ref.store.id, score: best, products });
-  }
-  return [...result.values()].sort((a, b) => b.score - a.score).slice(0, 60);
-}
-
-// ---------- live events (SSE) ----------
-// Events are rows in the db ("user:<id>" | "store:<id>" | "all" channels). Each stream polls for new
-// rows, so an event published on one serverless instance reaches clients connected to another.
-// On Vercel a stream ends before the function time limit; EventSource reconnects with Last-Event-ID.
-
-const STREAM_MS = process.env.VERCEL ? 50_000 : Infinity;
-
-async function stream(req, res, channels) {
-  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
-  res.write('retry: 3000\n\n');
-  let open = true;
-  res.on('close', () => { open = false; });
-  let last = Number(req.headers['last-event-id']) || await db.lastEventId();
-  const end = Date.now() + STREAM_MS;
-  let pingAt = Date.now() + 25000;
-  while (open && Date.now() < end) {
-    for (const e of await db.events(channels, last)) {
-      res.write(`id: ${e.id}\nevent: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`);
-      last = e.id;
-    }
-    if (Date.now() > pingAt) {
-      res.write(': ping\n\n');
-      pingAt = Date.now() + 25000;
-    }
-    await sleep(db.pollMs);
-  }
-  res.end();
 }
 
 // ---------- http helpers ----------
@@ -328,13 +358,13 @@ async function stream(req, res, channels) {
 const SECURITY = {
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'strict-origin-when-cross-origin',
-  'Permissions-Policy': 'geolocation=(self), camera=(self), microphone=()',
+  'Permissions-Policy': 'geolocation=(self), camera=(), microphone=()',
   'X-Frame-Options': 'SAMEORIGIN',
 };
 
-// Per-IP budget for writes (requests, offers, presence), so one client can't spam stores.
+// Per-IP budget for writes, so one client can't flood the map with fake shops or votes.
 const hits = new Map();
-function rateLimited(req, limit = 60) {
+function rateLimited(req, limit = 30) {
   const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
   const now = Date.now();
   const h = hits.get(ip);
@@ -343,11 +373,13 @@ function rateLimited(req, limit = 60) {
   return ++h.n > limit;
 }
 
-// JSON responses are gzipped when large (the full mall list is a few hundred KB; mobile data in Iran is slow).
+const acceptsGzip = (req) => /\bgzip\b/.test(req.headers['accept-encoding'] ?? '');
+
+// JSON responses are gzipped when large: mobile data in Iran is slow and expensive.
 function send(res, status, body) {
   let data = JSON.stringify(body);
   const headers = { ...SECURITY, 'Content-Type': MIME['.json'], 'Cache-Control': 'no-store', Vary: 'Accept-Encoding' };
-  if (data.length > 4096 && /\bgzip\b/.test(res.req?.headers['accept-encoding'] ?? '')) {
+  if (data.length > 2048 && acceptsGzip(res.req)) {
     data = gzipSync(data);
     headers['Content-Encoding'] = 'gzip';
   }
@@ -370,29 +402,29 @@ async function readBody(req, max = 64 * 1024) {
   }
 }
 
-const clean = (s, max) => String(s ?? '').trim().slice(0, max);
+const clean = (s, max) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 const isId = (s) => typeof s === 'string' && /^[\w-]{6,64}$/.test(s);
-const isGroup = (s) => typeof s === 'string' && /^[A-Z0-9]{6}$/.test(s);
 const num = (v, min, max) => (typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max ? v : null);
-// Public id for a member of a friends group, so the private user id (which authorizes requests) never leaks.
-const publicId = (userId) => createHash('sha256').update(`passajh:${userId}`).digest('hex').slice(0, 16);
-const PRESENCE_MS = 2 * 60 * 1000;
+const time = (t) => (/^([01]?\d|2[0-4]):[0-5]\d$/.test(toLatinDigits(t ?? '').trim()) ? toLatinDigits(t).trim().padStart(5, '0') : null);
 
-// A point the user chose to share, rounded to about 100 m.
-function roughPoint(p) {
-  const lat = num(p?.lat, IRAN.s, IRAN.n), lng = num(p?.lng, IRAN.w, IRAN.e);
-  return lat && lng ? { lat: Math.round(lat * 1000) / 1000, lng: Math.round(lng * 1000) / 1000 } : null;
-}
-
-function normalizePhone(p) {
-  const d = toLatinDigits(p).replace(/[\s-]/g, '');
-  const m = d.match(/^(?:\+98|0098|0)?(9\d{9})$/);
-  return m ? `0${m[1]}` : null;
-}
-
-async function withOffers(list) {
-  const offers = await db.offers(list.map((r) => r.id));
-  return list.map((r) => ({ ...r, offers: offers.filter((o) => o.requestId === r.id) }));
+// The editable fields of a shop, validated. Returns { error } or { shop }.
+function shopFields(body) {
+  const name = clean(body.name, 50);
+  const category = CATEGORIES[body.category] ? body.category : null;
+  const phone = clean(toLatinDigits(body.phone).replace(/[^\d+]/g, ''), 14);
+  const floor = FLOOR_ID.test(body.floor ?? '') ? body.floor : null;
+  const [open, close] = [time(body.open), time(body.close)];
+  if (name.length < 2) return { error: 'نام مغازه را بنویسید' };
+  if (!category) return { error: 'دسته مغازه را انتخاب کنید' };
+  if (phone && !/^(\+98|0)\d{9,11}$/.test(phone)) return { error: 'شماره تلفن معتبر نیست (مثلاً ۰۲۱۳۳۱۱۲۲۳۳ یا ۰۹۱۲۱۲۳۴۵۶۷)' };
+  return {
+    shop: {
+      name, category, floor, phone: phone || null,
+      hours: open && close ? `${open} تا ${close}` : null,
+      instagram: clean(body.instagram, 40).replace(/^@/, '').replace(/[^\w.]/g, '') || null,
+      keywords: clean(body.keywords, 200) || null,
+    },
+  };
 }
 
 // ---------- floor plans from the editor ----------
@@ -400,7 +432,6 @@ async function withOffers(list) {
 // Saving a plan needs this key when it's set (EDITOR_KEY env var); without it anyone could redraw a mall.
 const EDITOR_KEY = process.env.EDITOR_KEY || '';
 const POINTS = new Set(['entrance', 'elevator', 'stairs', 'escalator', 'wc', 'prayer', 'atm', 'info', 'foodcourt', 'kids', 'firstaid', 'fireexit']);
-const FLOOR_ID = /^(P[1-9]|B[1-9]|G|[1-9]\d?)$/;
 
 // Keep only well-formed geometry near the mall, with bounded sizes.
 function cleanPlan(body, mall) {
@@ -415,7 +446,7 @@ function cleanPlan(body, mall) {
     const units = (f.units ?? []).slice(0, 3000).map((u) => {
       const r = ring(u?.ring);
       if (!r || !/^[\w-]{1,40}$/.test(u.uid ?? '')) return null;
-      const category = CATEGORIES[u.category] && u.category !== 'vacant' ? u.category : null;
+      const category = CATEGORIES[u.category] ? u.category : null;
       return {
         uid: u.uid, ring: r, name: clean(u.name, 60) || null, category,
         phone: clean(u.phone, 20) || null, hours: clean(u.hours, 30) || null,
@@ -438,22 +469,30 @@ async function api(req, res, url) {
   const parts = url.pathname.split('/').filter(Boolean).slice(1); // drop "api"
   const q = url.searchParams;
   const method = req.method;
-  if (method === 'POST' && rateLimited(req, parts[0] === 'presence' ? 120 : 30)) {
+  if (method === 'POST' && rateLimited(req, parts[0] === 'plans' ? 10 : 30)) {
     return send(res, 429, { error: 'درخواست‌ها زیاد است؛ یک دقیقه دیگر تلاش کنید' });
   }
+  await sync();
 
-  if (method === 'GET' && parts[0] === 'events') {
-    const user = q.get('user');
-    const store = q.get('store');
-    const key = isId(user) ? `user:${user}` : storeById.has(store) ? `store:${store}` : null;
-    if (!key) return send(res, 400, { error: 'کانال نامعتبر' });
-    return stream(req, res, [key, 'all']);
+  // Everything the app needs to start: every mall, the shopping streets, and counts. Revalidated with an
+  // ETag, so a returning visitor downloads it again only after something changed.
+  if (method === 'GET' && parts[0] === 'boot') {
+    const b = boot();
+    const headers = { ...SECURITY, 'Content-Type': MIME['.json'], 'Cache-Control': 'no-cache', ETag: b.etag, Vary: 'Accept-Encoding' };
+    if (req.headers['if-none-match'] === b.etag) { res.writeHead(304, headers); return res.end(); }
+    if (acceptsGzip(req)) headers['Content-Encoding'] = 'gzip';
+    res.writeHead(200, headers);
+    return res.end(acceptsGzip(req) ? b.gz : b.body);
   }
-
-  await syncOverrides();
-
   if (method === 'GET' && parts[0] === 'malls' && parts.length === 1) {
-    return send(res, 200, malls.map(mallSummary));
+    return send(res, 200, [...malls.values()].map(summary));
+  }
+  if (method === 'GET' && parts[0] === 'malls' && parts.length === 2) {
+    const m = malls.get(parts[1]);
+    return m ? send(res, 200, details(m)) : send(res, 404, { error: 'این مکان پیدا نشد' });
+  }
+  if (method === 'GET' && parts[0] === 'search') {
+    return send(res, 200, { shops: searchShops(q.get('q') || '') });
   }
   // Malls around a point anywhere in Iran, fetched from OpenStreetMap once per area.
   if (method === 'GET' && parts[0] === 'discover') {
@@ -461,23 +500,103 @@ async function api(req, res, url) {
     if (!inIran(lat, lng)) return send(res, 400, { error: 'این نقطه داخل ایران نیست' });
     let partial = false;
     await discoverAround(lat, lng).catch(() => { partial = true; });
-    const near = malls.filter((m) => m.discovered && Math.abs(m.lat - lat) < 0.2 && Math.abs(m.lng - lng) < 0.2);
-    return send(res, 200, { malls: near.map(mallSummary), partial });
+    const near = [...malls.values()].filter((m) => m.discovered && Math.abs(m.lat - lat) < 0.2 && Math.abs(m.lng - lng) < 0.2);
+    return send(res, 200, { malls: near.map(summary), partial });
   }
-  if (method === 'GET' && parts[0] === 'footprint' && mallById.has(parts[1])) {
-    const m = mallById.get(parts[1]);
-    return send(res, 200, m.rings?.length ? { lat: m.lat, lng: m.lng, rings: m.rings } : { none: true, lat: m.lat, lng: m.lng });
+
+  // Someone adds a shop they saw (or their own shop) to a mall.
+  if (method === 'POST' && parts[0] === 'malls' && parts[2] === 'shops') {
+    const m = malls.get(parts[1]);
+    if (!m) return send(res, 404, { error: 'این مکان پیدا نشد' });
+    const body = await readBody(req);
+    if (!isId(body.userId)) return send(res, 400, { error: 'شناسه دستگاه نامعتبر است' });
+    const { shop, error } = shopFields(body);
+    if (error) return send(res, 400, { error });
+    if (m.shops.some((s) => norm(s.name) === norm(shop.name))) return send(res, 409, { error: 'مغازه‌ای با این نام در این پاساژ ثبت شده است' });
+    const owner = body.owner === true;
+    const token = owner ? randomBytes(9).toString('base64url') : null;
+    const id = `${m.id}-u${randomUUID().slice(0, 8)}`;
+    await db.setEdit(id, m.id, { ...shop, seen: body.here === true, by: publicId(body.userId) }, token && sha(token));
+    await sync(true);
+    return send(res, 201, { shop: shopOut(m.shops.find((s) => s.id === id)), token });
   }
+
+  // A shop's owner registers (claims) it or updates it. The first claim returns a management code; later
+  // edits need it. There are no accounts, so an unclaimed shop can be claimed by whoever asks first.
+  if (method === 'POST' && parts[0] === 'shops' && parts.length === 2) {
+    const m = malls.get(shopIndex.get(parts[1]));
+    const s = m?.shops.find((x) => x.id === parts[1]);
+    if (!s) return send(res, 404, { error: 'مغازه پیدا نشد' });
+    const body = await readBody(req);
+    const prev = await db.getEdit(s.id);
+    let token = null;
+    if (prev?.tokenHash) {
+      if (sha(clean(body.token, 40)) !== prev.tokenHash) return send(res, 403, { error: 'کد مدیریت مغازه درست نیست' });
+    } else {
+      token = randomBytes(9).toString('base64url');
+    }
+    // Only a registered owner can take their shop off the map; everyone else votes "gone".
+    if (body.remove === true) {
+      if (!prev?.tokenHash) return send(res, 403, { error: 'اول مغازه را به نام خودتان ثبت کنید' });
+      await db.setEdit(s.id, m.id, { ...prev.data, removed: true }, prev.tokenHash);
+      await sync(true);
+      return send(res, 200, { removed: true });
+    }
+    const { shop, error } = shopFields(body);
+    if (error) return send(res, 400, { error });
+    if (m.shops.some((x) => x.id !== s.id && norm(x.name) === norm(shop.name))) return send(res, 409, { error: 'مغازه دیگری با این نام در این پاساژ هست' });
+    await db.setEdit(s.id, m.id, { ...shop, hours: shop.hours ?? s.hours ?? null }, prev?.tokenHash ?? sha(token));
+    await sync(true);
+    return send(res, 200, { shop: shopOut(m.shops.find((x) => x.id === s.id)), token });
+  }
+
+  // "Still here" / "gone" on a shop.
+  if (method === 'POST' && parts[0] === 'shops' && parts[2] === 'vote') {
+    const mallId = shopIndex.get(parts[1]);
+    const body = await readBody(req);
+    if (!mallId || !isId(body.userId)) return send(res, 400, { error: 'درخواست نامعتبر' });
+    const user = publicId(body.userId);
+    for (const kind of ['here', 'gone']) {
+      await db.setVote(`shop:${parts[1]}|${kind}|${user}`, `shop:${parts[1]}`, kind, user, body.vote === kind || null);
+    }
+    await sync(true);
+    const s = malls.get(mallId).shops.find((x) => x.id === parts[1]);
+    return send(res, 200, { here: s?.here ?? 0, gone: s?.gone ?? 0 });
+  }
+
+  // What a mall sells, its real opening hours, or that it has closed down.
+  if (method === 'POST' && parts[0] === 'malls' && parts[2] === 'vote') {
+    const m = malls.get(parts[1]);
+    const body = await readBody(req);
+    if (!m || !isId(body.userId)) return send(res, 400, { error: 'درخواست نامعتبر' });
+    const user = publicId(body.userId);
+    const target = `mall:${m.id}`;
+    if (body.kind === 'tag' && CATEGORIES[body.category]) {
+      await db.setVote(`${target}|tag:${body.category}|${user}`, target, `tag:${body.category}`, user, body.on !== false || null);
+    } else if (body.kind === 'hours') {
+      const [open, close] = [time(body.open), time(body.close)];
+      const friday = ['open', 'closed'].includes(body.friday) ? body.friday : null;
+      if (!(open && close) && !friday) return send(res, 400, { error: 'ساعت باز و بسته شدن را وارد کنید' });
+      await db.setVote(`${target}|hours|${user}`, target, 'hours', user, { open, close, friday });
+    } else if (body.kind === 'closed') {
+      await db.setVote(`${target}|closed|${user}`, target, 'closed', user, body.on !== false || null);
+    } else {
+      return send(res, 400, { error: 'درخواست نامعتبر' });
+    }
+    await sync(true);
+    return send(res, 200, details(m));
+  }
+
   // Floor plan editor: the mall's outline, its current plan and the shops OpenStreetMap knows inside it.
-  if (parts[0] === 'plans' && mallById.has(parts[1])) {
-    const m = mallById.get(parts[1]);
+  if (parts[0] === 'plans' && malls.has(parts[1])) {
+    const m = malls.get(parts[1]);
     const def = defs.get(m.id);
     if (method === 'GET') {
       const plan = editorPlans.get(m.id) ?? OSM_PLANS[m.id]?.plan ?? OSM_PLANS[def?.osmId]?.plan ?? null;
       return send(res, 200, {
-        mall: { id: m.id, name: m.name, lat: m.lat, lng: m.lng, rings: m.rings ?? [], floors: m.floors.map((f) => ({ id: f.id, name: f.name, level: f.level })) },
+        mall: { id: m.id, name: m.name, lat: m.lat, lng: m.lng, rings: m.rings, floors: m.floors.map((id) => ({ id, name: floorName(id), level: levelOf(id) })) },
         plan, source: editorPlans.has(m.id) ? 'editor' : plan ? 'osm' : null,
-        shops: (def?.stores ?? []).map(({ name, category, floor, lat, lng }) => ({ name, category, floor, lat, lng })),
+        shops: (def?.stores ?? []).map(({ name, kind, floor, lat, lng }) => ({ name, category: kind ? categoryOfKind(kind) : 'other', floor, lat, lng })),
       });
     }
     if (method === 'POST') {
@@ -486,195 +605,18 @@ async function api(req, res, url) {
       if (!plan) return send(res, 400, { error: 'نقشه نامعتبر است' });
       await db.setPlan(m.id, plan);
       editorPlans.set(m.id, plan);
-      rebuild(m.id);
-      return send(res, 200, mallSummary(mallById.get(m.id)));
-    }
-  }
-  // Outlines of every mall near a point, for "am I inside a mall?" (passages in Amin Hozour are 30 m apart).
-  if (method === 'GET' && parts[0] === 'footprints') {
-    const lat = Number(q.get('lat')), lng = Number(q.get('lng'));
-    if (!inIran(lat, lng)) return send(res, 400, { error: 'این نقطه داخل ایران نیست' });
-    const near = malls.filter((m) => m.rings?.length && haversine(m, { lat, lng }) < 1500);
-    return send(res, 200, Object.fromEntries(near.map((m) => [m.id, m.rings])));
-  }
-  // Friends group: members who turned on location sharing.
-  if (parts[0] === 'presence' && method === 'POST') {
-    const body = await readBody(req);
-    if (!isId(body.userId) || !isGroup(body.group)) return send(res, 400, { error: 'گروه نامعتبر است' });
-    if (body.sharing === false) {
-      await db.setPresence(body.userId, body.group, null);
-      return send(res, 200, { ok: true });
-    }
-    const lat = num(body.lat, IRAN.s, IRAN.n), lng = num(body.lng, IRAN.w, IRAN.e);
-    const mall = mallById.get(body.mallId);
-    const floor = mall?.floors.find((f) => f.id === body.floor);
-    await db.setPresence(body.userId, body.group, {
-      id: publicId(body.userId), name: clean(body.name, 30) || 'دوست', emoji: clean(body.emoji, 4) || '🙂',
-      lat, lng, accuracy: num(body.accuracy, 0, 5000),
-      mallId: mall?.id ?? null, mallName: mall?.name ?? null,
-      floor: floor?.id ?? null, floorName: floor?.name ?? null,
-      x: floor ? num(body.x, 0, floor.w) : null, y: floor ? num(body.y, 0, floor.h) : null,
-    });
-    return send(res, 200, { ok: true, id: publicId(body.userId) });
-  }
-  if (parts[0] === 'groups' && method === 'GET' && isGroup(parts[1])) {
-    return send(res, 200, await db.groupPresence(parts[1], PRESENCE_MS));
-  }
-  if (method === 'GET' && parts[0] === 'malls' && parts.length === 2) {
-    const m = mallById.get(parts[1]);
-    return m ? send(res, 200, m) : send(res, 404, { error: 'پاساژ پیدا نشد' });
-  }
-  if (method === 'GET' && parts[0] === 'search') {
-    const mallId = q.get('mall') || undefined;
-    let results = searchProducts(q.get('q') || '', { mallId });
-    if (!results.length) results = searchProducts(q.get('q') || '', { mallId, threshold: 0.5 });
-    return send(res, 200, results);
-  }
-
-  if (parts[0] === 'stores' && parts[1]) {
-    const ref = storeById.get(parts[1]);
-    if (!ref) return send(res, 404, { error: 'فروشگاه پیدا نشد' });
-    const sid = ref.store.id;
-
-    if (method === 'GET' && parts.length === 2) {
-      return send(res, 200, { ...ref.store, ...storeSummary(ref), mallLat: ref.mall.lat, mallLng: ref.mall.lng });
-    }
-    if (method === 'GET' && parts[2] === 'requests') {
-      const list = await db.storeRequests(sid);
-      const offers = await db.offers(list.map((r) => r.id));
-      return send(res, 200, list.map(({ userId, matches, ...r }) => ({
-        ...r,
-        myProducts: matches.find((m) => m.storeId === sid).products
-          .map((pid) => ref.store.products.find((p) => p.id === pid)).filter(Boolean),
-        myOffers: offers.filter((o) => o.requestId === r.id && o.storeId === sid),
-      })));
-    }
-    if (method === 'POST' && parts[2] === 'discount') {
-      const body = await readBody(req);
-      const percent = Math.round(Number(body.percent));
-      ref.store.discount = percent > 0 && percent <= 90
-        ? { percent, title: clean(body.title, 40) || 'تخفیف ویژه' }
-        : null;
-      await db.setDiscount(sid, ref.store.discount);
-      await db.publish([{
-        channel: 'all', event: 'discount',
-        data: { mallId: ref.mall.id, storeId: sid, storeName: ref.store.name, discount: ref.store.discount },
-      }]);
-      return send(res, 200, ref.store);
-    }
-    // A shop registers itself in a unit (or corrects its details): name, category, phone, hours.
-    if (method === 'POST' && parts[2] === 'profile') {
-      const body = await readBody(req);
-      const name = clean(body.name, 50);
-      const category = CATEGORIES[body.category] && !['vacant', 'cinema'].includes(body.category) ? body.category : null;
-      const phone = clean(toLatinDigits(body.phone).replace(/[^\d+]/g, ''), 14);
-      const time = (t) => (/^([01]?\d|2[0-4]):[0-5]\d$/.test(toLatinDigits(t ?? '')) ? toLatinDigits(t).padStart(5, '0') : null);
-      const [open, close] = [time(body.open), time(body.close)];
-      if (name.length < 2 || !category) return send(res, 400, { error: 'نام و دسته فروشگاه لازم است' });
-      if (phone && !/^(\+98|0)\d{9,11}$/.test(phone)) return send(res, 400, { error: 'شماره تلفن معتبر نیست (مثلاً ۰۲۱۳۳۱۱۲۲۳۳)' });
-      const profile = {
-        name, category, phone: phone || null, hours: open && close ? `${open} تا ${close}` : ref.store.hours,
-        instagram: clean(body.instagram, 40).replace(/^@/, '') || null,
-      };
-      Object.assign(ref.store, profile, { vacant: false, claimed: true });
-      await db.setProfile(sid, profile);
-      return send(res, 200, { ...ref.store, ...storeSummary(ref), mallLat: ref.mall.lat, mallLng: ref.mall.lng });
-    }
-    if (method === 'POST' && parts[2] === 'products') {
-      const body = await readBody(req);
-      const name = clean(body.name, 60);
-      const price = Math.round(Number(toLatinDigits(body.price).replace(/[^\d]/g, '')));
-      if (!name || !(price > 0)) return send(res, 400, { error: 'نام و قیمت کالا لازم است' });
-      const product = { id: `${sid}-x${Date.now().toString(36)}`, name, price, tags: clean(body.tags, 120), inStock: true };
-      ref.store.products.push(product);
-      await db.addProduct(sid, product);
-      return send(res, 201, product);
-    }
-  }
-
-  if (parts[0] === 'requests') {
-    if (method === 'GET' && parts.length === 1) {
-      const user = q.get('user');
-      if (!isId(user)) return send(res, 400, { error: 'شناسه کاربر نامعتبر است' });
-      return send(res, 200, await withOffers(await db.userRequests(user)));
-    }
-    if (method === 'POST' && parts.length === 1) {
-      const body = await readBody(req);
-      const query = clean(body.query, 100);
-      const phone = normalizePhone(body.phone);
-      const name = clean(body.name, 40);
-      const mallId = body.mallId && mallById.has(body.mallId) ? body.mallId : null;
-      // "Near me": the client sends the malls within the chosen radius (it knows their corrected positions).
-      const nearIds = Array.isArray(body.mallIds) ? body.mallIds.filter((id) => mallById.has(id)).slice(0, 80) : null;
-      const scope = mallId ? new Set([mallId]) : nearIds?.length ? new Set(nearIds) : null;
-      if (!isId(body.userId)) return send(res, 400, { error: 'شناسه کاربر نامعتبر است' });
-      if (query.length < 2) return send(res, 400, { error: 'نام کالا را وارد کنید' });
-      if (!phone) return send(res, 400, { error: 'شماره موبایل معتبر نیست (مثلاً ۰۹۱۲۱۲۳۴۵۶۷)' });
-      if (!name) return send(res, 400, { error: 'نام خود را وارد کنید' });
-      if (body.consent !== true) return send(res, 400, { error: 'برای ارسال، اجازه اشتراک شماره لازم است' });
-
-      const request = {
-        id: randomUUID(), userId: body.userId, name, phone, query,
-        details: clean(body.details, 300),
-        budget: Math.round(Number(toLatinDigits(body.budget ?? '').replace(/[^\d]/g, ''))) || null,
-        mallId, mallName: mallId ? mallById.get(mallId).name : nearIds?.length ? `${nearIds.length} پاساژ نزدیک` : null,
-        location: body.shareLocation === true ? roughPoint(body.location) : null,
-        status: 'open', createdAt: new Date().toISOString(),
-        matches: matchStores(query, scope),
-      };
-      await db.addRequest(request);
-      const { matches, userId, ...publicReq } = request;
-      await db.publish(matches.map((m) => {
-        const store = storeById.get(m.storeId).store;
-        return {
-          channel: `store:${m.storeId}`, event: 'request',
-          data: {
-            ...publicReq,
-            myProducts: m.products.map((pid) => store.products.find((p) => p.id === pid)).filter(Boolean),
-            myOffers: [],
-          },
-        };
-      }));
-      return send(res, 201, {
-        ...request,
-        offers: [],
-        stores: matches.map((m) => storeSummary(storeById.get(m.storeId))),
-      });
-    }
-
-    const r = await db.getRequest(parts[1]);
-    if (!r) return send(res, 404, { error: 'درخواست پیدا نشد' });
-
-    if (method === 'POST' && parts[2] === 'offers') {
-      const body = await readBody(req);
-      const ref = storeById.get(body.storeId);
-      if (!ref || !r.matches.some((m) => m.storeId === ref.store.id)) {
-        return send(res, 403, { error: 'این درخواست برای این فروشگاه نیست' });
-      }
-      if (r.status !== 'open') return send(res, 409, { error: 'این درخواست بسته شده است' });
-      const offer = {
-        id: randomUUID(), requestId: r.id, storeId: ref.store.id,
-        price: Math.round(Number(toLatinDigits(body.price ?? '').replace(/[^\d]/g, ''))) || null,
-        message: clean(body.message, 300),
-        store: storeSummary(ref), createdAt: new Date().toISOString(),
-      };
-      await db.addOffer(offer);
-      await db.publish([{ channel: `user:${r.userId}`, event: 'offer', data: { ...offer, query: r.query } }]);
-      return send(res, 201, offer);
-    }
-    if (method === 'POST' && parts[2] === 'close') {
-      const body = await readBody(req);
-      if (body.userId !== r.userId) return send(res, 403, { error: 'اجازه ندارید' });
-      await db.closeRequest(r.id);
-      r.status = 'closed';
-      await db.publish(r.matches.map((m) => ({ channel: `store:${m.storeId}`, event: 'closed', data: { id: r.id } })));
-      return send(res, 200, (await withOffers([r]))[0]);
+      setPlan(m, plan);
+      version++;
+      return send(res, 200, { ...summary(m), mapped: plan.floors.filter((f) => f.units.length).length });
     }
   }
 
   send(res, 404, { error: 'Not found' });
 }
 
+// Static files. Text files are gzipped once and kept in memory; /vendor and /fonts never change at a
+// given path, so the browser may keep them for a year.
+const gzCache = new Map();
 async function serveStatic(req, res, url) {
   let rel = decodeURIComponent(url.pathname);
   if (rel === '/') rel = '/index.html';
@@ -685,8 +627,27 @@ async function serveStatic(req, res, url) {
   try {
     const st = await stat(file);
     if (!st.isFile()) throw new Error('not a file');
-    res.writeHead(200, { ...SECURITY, 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
-    createReadStream(file).pipe(res);
+    const ext = path.extname(file);
+    const immutable = /^\/(vendor|fonts)\//.test(rel);
+    const headers = {
+      ...SECURITY, 'Content-Type': MIME[ext] || 'application/octet-stream', Vary: 'Accept-Encoding',
+      'Cache-Control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
+      'Last-Modified': st.mtime.toUTCString(),
+    };
+    if (!immutable && req.headers['if-modified-since'] === headers['Last-Modified']) { res.writeHead(304, headers); return res.end(); }
+    let body = gzCache.get(file);
+    if (!body || body.mtime !== st.mtimeMs) {
+      const raw = await readFile(file);
+      body = { mtime: st.mtimeMs, raw, gz: /text|javascript|json|svg|manifest/.test(headers['Content-Type']) ? gzipSync(raw) : null };
+      gzCache.set(file, body);
+    }
+    if (body.gz && acceptsGzip(req)) {
+      headers['Content-Encoding'] = 'gzip';
+      res.writeHead(200, headers);
+      return res.end(body.gz);
+    }
+    res.writeHead(200, headers);
+    res.end(body.raw);
   } catch {
     send(res, 404, { error: 'Not found' });
   }
@@ -704,8 +665,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  const stores = storeById.size;
-  const real = [...storeById.values()].filter((r) => !r.store.vacant).length;
-  console.log(`Passajh running → http://localhost:${PORT}  (${malls.length} malls, ${real} shops, ${stores} units)`);
-  console.log(`Seller dashboard → http://localhost:${PORT}/seller`);
+  const shops = [...malls.values()].reduce((a, m) => a + m.shops.length, 0);
+  console.log(`Passajh running → http://localhost:${PORT}  (${malls.size} malls, ${shops} shops, ${hotspots.length} shopping streets, ${STATIONS.length} metro stations)`);
+  console.log(`Shop owners → http://localhost:${PORT}/seller · floor plan editor → http://localhost:${PORT}/editor`);
 });

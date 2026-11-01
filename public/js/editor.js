@@ -104,7 +104,7 @@ function undo() {
 async function boot() {
   $('#ed-key').value = store('editor.key', '');
   $('#ed-key').oninput = (e) => persist('editor.key', e.target.value);
-  try { maplibregl.setRTLTextPlugin('https://unpkg.com/@mapbox/mapbox-gl-rtl-text@0.2.3/mapbox-gl-rtl-text.min.js', true); } catch { /* set */ }
+  try { maplibregl.setRTLTextPlugin('/vendor/rtl-text-0.2.3.js', true); } catch { /* set */ }
   map = new maplibregl.Map({ container: 'ed-map', style: STYLE, center: [51.39, 35.7], zoom: 12, dragRotate: false, attributionControl: { compact: true } });
   map.touchZoomRotate.disableRotation();
   map.doubleClickZoom.disable();
@@ -124,8 +124,8 @@ async function boot() {
 
 function fillMalls() {
   const qt = tokens($('#ed-mall-q').value);
-  const list = qt.length ? malls.filter((m) => matchScore(qt, `${m.name} ${m.nameEn ?? ''} ${m.area ?? ''}`) >= 1) : malls;
-  $('#ed-mall').innerHTML = list.slice(0, 400).map((m) => `<option value="${m.id}" ${m.id === data?.mall.id ? 'selected' : ''}>${m.plan ? '🗺️ ' : ''}${esc(m.name)}${m.area ? ` — ${esc(m.area)}` : ''}</option>`).join('');
+  const list = qt.length ? malls.filter((m) => matchScore(qt, `${m.name} ${m.nameEn ?? ''} ${m.hood ?? ''}`) >= 1) : malls;
+  $('#ed-mall').innerHTML = list.slice(0, 400).map((m) => `<option value="${m.id}" ${m.id === data?.mall.id ? 'selected' : ''}>${m.plan ? '🗺️ ' : ''}${esc(m.name)}${m.hood ? ` — ${esc(m.hood)}` : ''}</option>`).join('');
 }
 
 async function openMall(id) {
@@ -133,7 +133,7 @@ async function openMall(id) {
   data = await api(`/plans/${encodeURIComponent(id)}`);
   persist('editor.mall', id);
   window.history.replaceState(null, '', `#${encodeURIComponent(id)}`);
-  $('#ed-view').href = `/#/mall/${encodeURIComponent(id)}`;
+  $('#ed-view').href = `/#/m/${encodeURIComponent(id)}`;
   plan = data.plan ? JSON.parse(JSON.stringify({ floors: data.plan.floors })) : { floors: [] };
   for (const f of plan.floors) { f.units ??= []; f.areas ??= []; f.points ??= []; }
   undoStack = [];
@@ -535,7 +535,7 @@ async function save() {
     persist(`editor.draft.${data.mall.id}`, null);
     const i = malls.findIndex((x) => x.id === m.id);
     if (i >= 0) malls[i] = m;
-    toast(`✅ ذخیره شد · ${fa(m.stores)} فروشگاه · ${fa(m.mapped)} طبقه نقشه واقعی. <a href="/#/mall/${encodeURIComponent(m.id)}">مشاهده</a>`, 'good', 7000);
+    toast(`✅ ذخیره شد · ${fa(m.mapped)} طبقه نقشه واقعی. <a href="/#/m/${encodeURIComponent(m.id)}">مشاهده</a>`, 'good', 7000);
     fillFloors();
     render();
   } catch (e) {

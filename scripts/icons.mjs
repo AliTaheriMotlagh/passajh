@@ -1,5 +1,5 @@
-// Renders the app icons (public/icon-*.png) with plain Node: a green shopping bag with a map pin
-// on the dark map background. Run: node scripts/icons.mjs
+// Renders the app icons (public/icon-*.png) with plain Node: a light shopping bag with a map pin
+// on the brand teal. Run: npm run icons
 import { writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 
@@ -37,22 +37,22 @@ function png(size, pixel) {
 
 // Design in a 0..1 square; everything important sits inside the central 60% (maskable safe zone).
 function icon(u, v) {
-  const bg = [11 + 10 * v, 17 + 12 * v, 24 + 16 * v];
+  const bg = [15 - 4 * v, 118 - 24 * v, 110 - 23 * v]; // #0f766e → #0b5e57
   const inRR = (x0, y0, x1, y1, r) => {
     const cx = Math.min(Math.max(u, x0 + r), x1 - r), cy = Math.min(Math.max(v, y0 + r), y1 - r);
     return u >= x0 && u <= x1 && v >= y0 && v <= y1 && Math.hypot(u - cx, v - cy) <= r;
   };
   // Bag handle
   const hd = Math.hypot(u - 0.5, v - 0.4);
-  if (v < 0.42 && hd > 0.1 && hd < 0.14) return [242, 245, 248];
+  if (v < 0.42 && hd > 0.1 && hd < 0.14) return [246, 244, 239];
   // Bag body
   if (inRR(0.27, 0.38, 0.73, 0.8, 0.06)) {
     // Map pin cut-out on the bag
     const pd = Math.hypot(u - 0.5, v - 0.55);
     const tip = v > 0.55 && v < 0.7 && Math.abs(u - 0.5) < (0.7 - v) * 0.55;
-    if (pd < 0.035) return [47, 210, 122];
-    if (pd < 0.085 || tip) return [11, 17, 24];
-    return [47, 210, 122];
+    if (pd < 0.035) return [246, 244, 239];
+    if (pd < 0.085 || tip) return [15, 118, 110];
+    return [246, 244, 239];
   }
   return bg;
 }

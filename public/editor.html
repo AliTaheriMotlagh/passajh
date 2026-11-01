@@ -6,11 +6,8 @@
   <meta name="theme-color" content="#0b1118">
   <title>ویرایشگر نقشه داخلی — پاساژ</title>
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;600;700;800;900&display=swap">
-  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
-  <link rel="stylesheet" href="/css/app.css">
+  <link rel="stylesheet" href="/vendor/maplibre-gl-4.7.1.css">
+  <link rel="stylesheet" href="/css/editor.css">
   <style>
     body { display: grid; grid-template-columns: 340px 1fr; grid-template-rows: auto 1fr; height: 100dvh; }
     .ed-top { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; padding: 8px 12px; background: var(--surface-2); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
@@ -96,7 +93,7 @@
 
   <div id="modal" class="modal hidden"><div class="modal-box" id="modal-box"></div></div>
   <div id="toasts" class="toasts"></div>
-  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script src="/vendor/maplibre-gl-4.7.1.js"></script>
   <script type="module" src="/js/editor.js"></script>
 </body>
 </html>

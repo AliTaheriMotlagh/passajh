@@ -1,15 +1,18 @@
 {
   "name": "passajh",
-  "version": "0.2.0",
-  "description": "Live maps of shopping malls across Iran: real GPS, turn-by-turn navigation, indoor floor maps, parking, shopping lists, friends and live discounts.",
+  "version": "0.3.0",
+  "description": "Where in Tehran to buy what: shopping streets, malls and passages with what they sell, opening hours and the nearest metro, from OpenStreetMap and the people who shop there.",
   "type": "module",
   "private": true,
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
     "icons": "node scripts/icons.mjs",
-    "data": "node scripts/fetch-tehran.mjs && node scripts/fetch-indoor.mjs",
-    "indoor": "node scripts/fetch-indoor.mjs"
+    "data": "node scripts/fetch-tehran.mjs && node scripts/fetch-metro.mjs && node scripts/fetch-hotspots.mjs && node scripts/fetch-indoor.mjs",
+    "metro": "node scripts/fetch-metro.mjs",
+    "hotspots": "node scripts/fetch-hotspots.mjs",
+    "indoor": "node scripts/fetch-indoor.mjs",
+    "vendor": "node scripts/vendor.mjs"
   },
   "engines": {
     "node": ">=20"

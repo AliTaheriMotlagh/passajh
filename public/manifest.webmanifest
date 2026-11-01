@@ -1,15 +1,15 @@
 {
-  "name": "پاساژ — نقشه مراکز خرید ایران",
+  "name": "پاساژ — کجا بخرم؟",
   "short_name": "پاساژ",
-  "description": "مسیریابی تا پاساژ، نقشه داخلی طبقات، تخفیف‌ها، پارکینگ، لیست خرید و درخواست کالا",
+  "description": "هر جنسی را در تهران کجا بخرید: راسته‌ها، پاساژها و مراکز خرید، ساعت کاری، نزدیک‌ترین مترو و مغازه‌ها",
   "lang": "fa",
   "dir": "rtl",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "orientation": "any",
-  "background_color": "#0b1118",
-  "theme_color": "#0b1118",
+  "orientation": "portrait",
+  "background_color": "#f6f4ef",
+  "theme_color": "#f6f4ef",
   "categories": ["shopping", "navigation", "lifestyle"],
   "icons": [
     { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
@@ -18,7 +18,8 @@
     { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }
   ],
   "shortcuts": [
-    { "name": "لیست خرید", "url": "/#/", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] },
-    { "name": "پنل فروشنده", "url": "/seller", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] }
+    { "name": "لیست خرید", "url": "/#/list", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] },
+    { "name": "نقشه", "url": "/#/map", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] },
+    { "name": "ثبت مغازه", "url": "/seller", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] }
   ]
 }

@@ -3,61 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-  <meta name="theme-color" content="#0b1118">
-  <title>پنل فروشنده — پاساژ</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;600;700;800;900&display=swap">
+  <meta name="theme-color" content="#f6f4ef" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#12110e" media="(prefers-color-scheme: dark)">
+  <meta name="description" content="مغازه‌تان را رایگان در پاساژ ثبت کنید تا کسانی که دنبال جنس شما هستند پیدایتان کنند.">
+  <title>ثبت مغازه — پاساژ</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="preload" href="/fonts/vazirmatn-33.0.3.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/css/app.css">
-  <style>
-    html, body { overflow: auto; }
-    .wrap { max-width: 960px; margin: 0 auto; padding: 16px; }
-    .seller-top { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
-    .box { background: var(--panel-solid); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 14px; }
-    #store-info .store-head { flex-wrap: wrap; }
-    .tabs { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
-    .tabs .btn.on { background: #fff; color: #000; }
-    .req-card.new { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(47, 210, 122, 0.3); }
-    .call { font-size: 18px; padding: 12px 20px; }
-    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-    @media (max-width: 700px) { .grid2 { grid-template-columns: 1fr; } }
-    .live { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--accent); }
-    .live::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 1.4s infinite; }
-  </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="seller-top">
-      <div class="brand">پاساژ<small>SELLER PANEL</small></div>
-      <a class="btn" href="/">← نقشه خریدار</a>
-      <span id="live" class="live hidden">اتصال زنده</span>
-    </div>
-
-    <div class="box" id="login">
-      <h2 style="margin-top:0">ورود فروشنده</h2>
-      <div class="sub">پاساژ و مغازه خود را انتخاب کنید. اگر مغازه‌تان در فهرست نیست، یک واحد خالی را انتخاب و ثبت کنید (نسخه آزمایشی — احراز هویت ندارد).</div>
-      <label>جستجوی پاساژ</label><input class="field" id="mall-q" type="search" autocomplete="off" placeholder="مثلاً علاءالدین، امین حضور، تهرانپارس">
-      <div class="grid2">
-        <div><label>پاساژ</label><select id="sel-mall"></select></div>
-        <div><label>فروشگاه</label><select id="sel-store"></select></div>
-      </div>
-      <div style="margin-top:14px"><button class="btn primary" id="btn-login">ورود به پنل</button></div>
-    </div>
-
-    <div id="panel" class="hidden">
-      <div class="box" id="store-info"></div>
-      <div class="tabs" id="tabs">
-        <button class="btn on" data-tab="requests">📥 درخواست مشتری‌ها <b class="badge hidden" id="req-badge"></b></button>
-        <button class="btn" data-tab="discount">🏷️ تخفیف</button>
-        <button class="btn" data-tab="products">📦 محصولات</button>
-      </div>
-      <div id="tab-requests"></div>
-      <div id="tab-discount" class="hidden"></div>
-      <div id="tab-products" class="hidden"></div>
-    </div>
-  </div>
-  <div id="modal" class="modal hidden"><div class="modal-box" id="modal-box"></div></div>
-  <div id="toasts" class="toasts"></div>
+  <header class="app-header">
+    <a class="logo" href="/"><span class="mark">پ</span>پاساژ<small>برای مغازه‌داران</small></a>
+    <a class="btn sm ghost" href="/">برنامه ←</a>
+  </header>
+  <main id="view" style="padding-bottom:48px"></main>
+  <div id="toasts" class="toasts" style="bottom:16px"></div>
   <script type="module" src="/js/seller.js"></script>
 </body>
 </html>

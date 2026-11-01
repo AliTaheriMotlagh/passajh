@@ -9,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { osmCategory } from '../public/shared/catalog.js';
 import { areaOf } from '../public/shared/frame.js';
-import { fidOf } from '../lib/plan.js';
+import { fidOf } from '../public/shared/floors.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, 'data', 'plans-osm.json');
