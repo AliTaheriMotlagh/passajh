@@ -81,7 +81,10 @@ async function enterMall(id, storeId) {
     renderMoney();
     renderQuickBar();
     const st = openStatus(mall.hours);
-    help(`به <b>${esc(mall.name)}</b> خوش آمدید! 👋${st && !st.open ? ` <span class="closed">(${st.text})</span>` : ''}<br>با جوی‌استیک یا لمس راهرو راه بروید. از کنار مغازه‌های <b>٪</b>دار رد شوید تا کوپن بگیرید.`);
+    const real = mall.floors.reduce((n, f) => n + f.stores.filter((s) => !s.vacant).length, 0);
+    help(`به <b>${esc(mall.name)}</b> خوش آمدید! 👋${st && !st.open ? ` <span class="closed">(${st.text})</span>` : ''}
+      <br>${real ? `${fa(real)} فروشگاه ثبت‌شده روی نقشه است` : 'هنوز فروشگاهی برای این پاساژ ثبت نشده'}؛ نقشه داخلی شماتیک است و واحدهای خاکستری ثبت نشده‌اند.
+      <br>با جوی‌استیک یا لمس راهرو راه بروید.`, 9000);
     setupFrame(id);
   }
   if (storeId) {
@@ -173,6 +176,7 @@ geo.addEventListener('position', () => { if (state.mall) applyGps(); });
 const engineHooks = {
   onStoreClick: (s) => openStore(s),
   onStoreEnter: (s) => {
+    if (s.vacant) return;
     toast(`${cat(s.category).icon} وارد <b>${esc(s.name)}</b> شدید`, '', 2200);
     openStore(s);
   },
@@ -222,7 +226,7 @@ function renderFloors() {
   const car = e.car?.floor;
   $('#floor-picker').innerHTML = `<div class="lbl">طبقات</div>` + state.mall.floors.map((f) => `
     <button data-floor="${f.id}" title="${esc(f.name)}" class="${f.id === e.viewFloor ? 'view' : ''} ${f.id === e.player.floor ? 'here' : ''} ${f.id === wpFloor ? 'target' : ''}">
-      ${f.type === 'parking' ? 'P' + fa(-f.level) : f.level === 0 ? 'G' : fa(f.level)}${f.id === car ? '<i class="car-dot">🚗</i>' : ''}
+      ${f.level < 0 ? (f.type === 'parking' ? 'P' : 'B') + fa(-f.level) : f.level === 0 ? 'G' : fa(f.level)}${f.id === car ? '<i class="car-dot">🚗</i>' : ''}
       ${e.friends.some((fr) => fr.floor === f.id) ? '<i class="friend-dot"></i>' : ''}
     </button>`).join('');
   for (const b of $$('#floor-picker button')) {
@@ -235,10 +239,13 @@ function renderMoney() {
   let saving = 0;
   for (const id of e.collected) {
     const s = findStore(id);
-    if (!s?.discount) continue;
+    if (!s?.discount || !s.products.length) continue;
     const avg = s.products.reduce((a, p) => a + p.price, 0) / s.products.length;
     saving += (avg * s.discount.percent) / 100;
   }
+  // Coupons only mean something in a mall where shops have posted discounts.
+  const deals = state.mall.floors.some((f) => f.stores.some((s) => s.discount));
+  $('#hud-money').classList.toggle('hidden', !deals && !e.collected.size);
   $('#hud-money').innerHTML = `${toman(saving).replace(' تومان', '')} <span style="font-size:14px">ت</span>
     <small>🎟️ ${fa(e.collected.size)} کوپن تخفیف</small>`;
 }
@@ -291,26 +298,45 @@ function floorModal(kind) {
 
 // ---------- store panel ----------
 
+// An unclaimed unit in the schematic plan: invite the shop that's really there to register.
+function openVacant(s) {
+  const f = floorOf(s);
+  openDrawer($('#store-panel'), `
+    <div class="store-head">
+      <div class="store-ico" style="background:${cat('vacant').color}">🏬</div>
+      <div class="grow"><h2>${esc(s.name)}</h2><div class="sub">${esc(f.name)} · ثبت‌نشده</div></div>
+    </div>
+    <p class="sub">نقشه داخلی این پاساژ شماتیک است و هنوز فروشگاهی برای این واحد ثبت نشده. فروشگاه‌هایی که در OpenStreetMap ثبت شده‌اند، نزدیک جای واقعی‌شان روی نقشه آمده‌اند.</p>
+    <div class="actions-row">
+      <a class="btn primary" href="/seller?store=${encodeURIComponent(s.id)}">🏪 فروشنده هستید؟ مغازه‌تان را ثبت کنید</a>
+    </div>`);
+}
+
 function openStore(s) {
+  if (s.vacant) return openVacant(s);
   const c = cat(s.category);
   const f = floorOf(s);
   const st = openStatus(s.hours);
+  const tel = s.phone?.replace(/[^\d+]/g, '');
   addRecent(s, state.mall);
   const el = openDrawer($('#store-panel'), `
     <div class="store-head">
       <div class="store-ico" style="background:${c.color}">${c.icon}</div>
-      <div class="grow"><h2>${esc(s.name)}</h2><div class="sub">${c.label} · ${esc(f.name)} · ⭐ ${fa(s.rating)}</div></div>
+      <div class="grow"><h2>${esc(s.name)}</h2><div class="sub">${c.label} · ${esc(f.name)}${s.source === 'osm' && !s.floorKnown && !s.claimed ? ' (طبقه نامشخص)' : ''}${s.rating ? ` · ⭐ ${fa(s.rating)}` : ''}</div></div>
       <button class="icon-btn fav ${isFav(`s:${s.id}`) ? 'on' : ''}" id="sp-fav" aria-label="علاقه‌مندی">${isFav(`s:${s.id}`) ? '♥' : '♡'}</button>
     </div>
     ${s.discount ? `<div class="discount-banner"><span>🏷️ ${esc(s.discount.title)}<br><small>روی همه کالاها</small></span><span class="pct">${fa(s.discount.percent)}٪</span></div>` : ''}
-    <div class="sub">🕘 ${esc(s.hours)}${st ? ` · <b class="${st.open ? 'open' : 'closed'}">${st.text}</b>` : ''} · ☎️ <span dir="ltr">${fa(s.phone)}</span></div>
+    <div class="sub">${s.hours ? `🕘 ${fa(s.hours)}${st ? ` · <b class="${st.open ? 'open' : 'closed'}">${st.text}</b>` : ''}` : '🕘 ساعت کاری ثبت نشده'}${s.phone ? ` · ☎️ <span dir="ltr">${fa(s.phone)}</span>` : ''}
+      ${s.instagram ? ` · <a target="_blank" rel="noopener" href="https://instagram.com/${encodeURIComponent(s.instagram.replace(/^.*instagram\.com\//, '').replace(/\/$/, ''))}">اینستاگرام</a>` : ''}
+      ${s.website ? ` · <a target="_blank" rel="noopener" href="${esc(/^https?:/.test(s.website) ? s.website : `https://${s.website}`)}">وب‌سایت</a>` : ''}</div>
     <div class="actions-row">
       <button class="btn purple" id="sp-route">🧭 مسیریابی</button>
       <button class="btn primary" id="sp-go">🚶 برو اونجا</button>
-      <a class="btn" href="tel:${esc(s.phone.replace(/-/g, ''))}">📞 تماس</a>
+      ${tel ? `<a class="btn" href="tel:${esc(tel)}">📞 تماس</a>` : ''}
       <button class="btn icon" id="sp-share" aria-label="اشتراک">📤</button>
     </div>
     <h3>محصولات (${fa(s.products.length)})</h3>
+    ${s.products.length ? '' : '<div class="sub">این فروشگاه هنوز کالا و قیمتی ثبت نکرده. درخواست بدهید تا خبردار شود.</div>'}
     ${s.products.map((p) => `
       <div class="product ${p.inStock ? '' : 'out'}">
         <div class="grow"><div class="n">${esc(p.name)}</div><div class="t">${p.inStock ? 'موجود' : 'ناموجود'}</div></div>
@@ -410,6 +436,7 @@ function bindMallSearch() {
     const hits = [];
     for (const f of state.mall.floors) {
       for (const s of f.stores) {
+        if (s.vacant) continue;
         const ss = matchScore(qt, `${s.name} ${cat(s.category).label} ${CATEGORIES[s.category]?.keywords.join(' ')}`);
         if (ss >= 1) hits.push({ s, f, score: 1.1 });
         for (const p of s.products) {
@@ -546,7 +573,7 @@ async function openMyRequests() {
             ${o.price ? `<div class="price">${toman(o.price)}</div>` : ''}
             ${o.message ? `<div>${esc(o.message)}</div>` : ''}
             <div class="actions-row">
-              <a class="btn small primary" href="tel:${esc(o.store.phone.replace(/-/g, ''))}">📞 تماس</a>
+              ${o.store.phone ? `<a class="btn small primary" href="tel:${esc(o.store.phone.replace(/[^\d+]/g, ''))}">📞 تماس</a>` : ''}
               <button class="btn small purple" data-goto="${o.store.mallId}/${o.store.id}">🧭 برو به فروشگاه</button>
             </div>
           </div>`).join('') || '<div class="meta">هنوز پیشنهادی نرسیده…</div>'}
@@ -629,7 +656,7 @@ function connectEvents() {
     beep();
     vibrate([60, 60, 60]);
     const t = toast(`💬 <b>${esc(o.store.name)}</b> برای «${esc(o.query)}» پیشنهاد داد${o.price ? `: ${toman(o.price)}` : ''}
-      <div class="actions-row" style="margin:6px 0 0"><a class="btn small primary" href="tel:${esc(o.store.phone.replace(/-/g, ''))}">📞 تماس</a>
+      <div class="actions-row" style="margin:6px 0 0">${o.store.phone ? `<a class="btn small primary" href="tel:${esc(o.store.phone.replace(/[^\d+]/g, ''))}">📞 تماس</a>` : ''}
       <button class="btn small" data-action="myreq">مشاهده</button></div>`, 'offer', 9000);
     t.style.pointerEvents = 'auto';
     if (!$('#myreq-panel').classList.contains('hidden')) openMyRequests();

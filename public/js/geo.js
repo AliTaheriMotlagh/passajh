@@ -1,5 +1,5 @@
 // Real-world location: live GPS fix and compass, distances, road routing (OSRM) with turn-by-turn
-// progress, and fitting a mall's indoor grid onto its real building outline.
+// progress, and fitting a mall's indoor grid onto its real building outline (shared/frame.js).
 
 import { toFaDigits as fa } from '/shared/text.js';
 
@@ -42,7 +42,8 @@ class Geo extends EventTarget {
       if (!window.isSecureContext) return reject(new Error('موقعیت‌یابی فقط روی HTTPS یا localhost کار می‌کند.'));
       if (!navigator.geolocation) return reject(new Error('مرورگر شما موقعیت‌یابی را پشتیبانی نمی‌کند.'));
       let first = true;
-      this.watchId = navigator.geolocation.watchPosition((p) => {
+      const accept = (p) => {
+        if (!this.plausible(p)) return;
         const c = p.coords;
         this.pos = {
           lat: c.latitude, lng: c.longitude, accuracy: c.accuracy, speed: c.speed,
@@ -52,13 +53,34 @@ class Geo extends EventTarget {
         try { localStorage.setItem(LAST_KEY, JSON.stringify(this.last)); } catch { /* storage unavailable */ }
         this.dispatchEvent(new Event('position'));
         if (first) { first = false; resolve(this.pos); }
-      }, (err) => {
+      };
+      this.watchId = navigator.geolocation.watchPosition(accept, (err) => {
         const e = new Error(ERRORS[err.code] || 'خطا در موقعیت‌یابی');
         e.code = err.code;
         if (err.code === 1) this.stop();
         if (first) { first = false; reject(e); } else if (err.code !== 3) this.dispatchEvent(Object.assign(new Event('error'), { error: e }));
       }, { enableHighAccuracy: true, maximumAge: 3000, timeout: 20000 });
+      // GPS can take a while to lock (indoors, between tall buildings); a quick Wi-Fi/cell fix shows the
+      // user right away and the watch above refines it.
+      navigator.geolocation.getCurrentPosition((p) => { if (!this.pos && this.active) accept(p); }, () => {}, { enableHighAccuracy: false, maximumAge: 60000, timeout: 8000 });
     });
+  }
+
+  // Drop fixes that jump impossibly far (GPS spoofing and jamming are common in Tehran). Three rejected
+  // fixes in a row are taken as the truth, in case the earlier fix was the wrong one.
+  plausible(p) {
+    const c = p.coords;
+    const prev = this.pos;
+    if (!prev || this.rejected >= 3) { this.rejected = 0; return true; }
+    const dt = Math.max(1, (p.timestamp - prev.ts) / 1000);
+    // Movement beyond both fixes' error circles (a coarse Wi-Fi fix followed by GPS isn't a jump).
+    const moved = distance(prev, { lat: c.latitude, lng: c.longitude }) - prev.accuracy - c.accuracy;
+    if (moved / dt > 85) {
+      this.rejected = (this.rejected || 0) + 1;
+      return false;
+    }
+    this.rejected = 0;
+    return true;
   }
 
   stop() {
@@ -245,58 +267,4 @@ export function progress(r, pos, hint = 0) {
 
 // ---------- indoor grid ↔ real world ----------
 
-function hull(points) {
-  const p = [...points].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
-  const lower = [], upper = [];
-  for (const q of p) { while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], q) <= 0) lower.pop(); lower.push(q); }
-  for (const q of p.reverse()) { while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], q) <= 0) upper.pop(); upper.push(q); }
-  return lower.slice(0, -1).concat(upper.slice(0, -1));
-}
-
-// Fit the w×h indoor grid onto the minimum-area rectangle around the building's real outline,
-// long side along the grid's x axis, kept roughly north-up. Without an outline the grid is
-// centered on the mall at 1 cell = 1 m.
-export function mallFrame(mall, w, h) {
-  const lat0 = mall.lat, lng0 = mall.lng;
-  const kx = 111320 * Math.cos((lat0 * Math.PI) / 180), ky = 110540;
-  const toXY = (lat, lng) => [(lng - lng0) * kx, (lat - lat0) * ky];
-  let c = [0, 0], ex = [1, 0], ey = [0, -1], L = w, S = h;
-
-  const pts = (mall.rings || []).flat().map(([lat, lng]) => toXY(lat, lng));
-  if (pts.length >= 3) {
-    const hp = hull(pts);
-    let best = null;
-    for (let i = 0; i < hp.length; i++) {
-      const a = hp[i], b = hp[(i + 1) % hp.length];
-      const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
-      if (!len) continue;
-      const u = [(b[0] - a[0]) / len, (b[1] - a[1]) / len], v = [-u[1], u[0]];
-      let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
-      for (const q of hp) {
-        const pu = q[0] * u[0] + q[1] * u[1], pv = q[0] * v[0] + q[1] * v[1];
-        u0 = Math.min(u0, pu); u1 = Math.max(u1, pu); v0 = Math.min(v0, pv); v1 = Math.max(v1, pv);
-      }
-      const area = (u1 - u0) * (v1 - v0);
-      if (!best || area < best.area) best = { area, u, v, lu: u1 - u0, lv: v1 - v0, cu: (u0 + u1) / 2, cv: (v0 + v1) / 2 };
-    }
-    if (best && Math.min(best.lu, best.lv) > 12) {
-      c = [best.cu * best.u[0] + best.cv * best.v[0], best.cu * best.u[1] + best.cv * best.v[1]];
-      let [ax, ay] = best.lu >= best.lv ? [best.u, best.v] : [best.v, best.u];
-      [L, S] = best.lu >= best.lv ? [best.lu, best.lv] : [best.lv, best.lu];
-      if (ax[0] < 0) ax = [-ax[0], -ax[1]]; // grid x points east-ish
-      if (ay[1] > 0) ay = [-ay[0], -ay[1]]; // grid y points south-ish (screen down)
-      ex = ax; ey = ay;
-    }
-  }
-  const sx = L / w, sy = S / h; // meters per cell
-  return {
-    cellMeters: Math.sqrt(sx * sy),
-    north: Math.atan2(ey[1] / sy, ex[1] / sx), // direction of real north on the grid
-    toGrid(lat, lng) {
-      const [x, y] = toXY(lat, lng);
-      const d = [x - c[0], y - c[1]];
-      return { x: (d[0] * ex[0] + d[1] * ex[1]) / sx + w / 2, y: (d[0] * ey[0] + d[1] * ey[1]) / sy + h / 2 };
-    },
-  };
-}
+export { mallFrame } from '/shared/frame.js';

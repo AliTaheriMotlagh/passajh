@@ -871,7 +871,7 @@ export class MallEngine {
       ctx.strokeRect(st.x - 0.2, st.y - 0.2, st.w + 0.4, st.h + 0.4);
     }
 
-    if (detailed) {
+    if (detailed && !st.vacant) {
       const c = center(st);
       const big = st.w * s > 46 && st.h * s > 30;
       this.text(ctx, '', Math.min(st.w, st.h) * 0.32, 'center');

@@ -1,5 +1,6 @@
 // Passajh server: static files, mall/store API, product requests and live notifications (SSE).
 // Run with `node server.js`. Stores data in data/db.json, or in Neon Postgres when DATABASE_URL is set.
+// Tehran's malls come from the OpenStreetMap snapshot in data/tehran.json (`npm run data` refreshes it).
 
 import http from 'node:http';
 import { stat } from 'node:fs/promises';
@@ -7,8 +8,9 @@ import { existsSync, readFileSync, createReadStream } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, createHash } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { buildMalls, buildMall, discoveredDef, MALL_DEFS } from './lib/seed.js';
+import { buildMall, discoveredDef, mergeCurated } from './lib/seed.js';
 import { openDb } from './lib/db.js';
 import { CATEGORIES } from './public/shared/catalog.js';
 import { tokens, matchScore, toLatinDigits } from './public/shared/text.js';
@@ -33,8 +35,9 @@ const db = await openDb({ dir: DATA });
 const malls = [];
 const mallById = new Map();
 const storeById = new Map(); // id -> { store, mall, floor }
-// Seed discount and product count per store, so seller edits can be re-applied from scratch.
+// Original profile, discount and product count per store, so seller edits can be re-applied from scratch.
 const base = new Map();
+const PROFILE = ['name', 'category', 'phone', 'hours', 'instagram', 'vacant', 'claimed'];
 
 function register(mall) {
   if (mallById.has(mall.id)) return;
@@ -46,18 +49,26 @@ function register(mall) {
   for (const floor of mall.floors) {
     for (const store of floor.stores) {
       storeById.set(store.id, { store, mall, floor });
-      base.set(store.id, { discount: store.discount, products: store.products.length });
+      base.set(store.id, {
+        discount: store.discount, products: store.products.length,
+        profile: Object.fromEntries(PROFILE.map((k) => [k, store[k] ?? null])),
+      });
     }
   }
 }
-for (const mall of buildMalls()) register(mall);
 
-// Malls found on OpenStreetMap (by any instance) are kept in the db and rebuilt here.
+// Every mall, passage and bazaar in Tehran, with the shops mapped inside them.
+const SNAPSHOT = JSON.parse(readFileSync(new URL('./data/tehran.json', import.meta.url), 'utf8'));
+const [bs, bw, bn, be] = SNAPSHOT.bbox.split(',').map(Number);
+const inSnapshot = (lat, lng) => lat > bs && lat < bn && lng > bw && lng < be;
+for (const def of mergeCurated(SNAPSHOT.malls)) register(buildMall(def));
+
+// Malls found on OpenStreetMap outside Tehran (by any instance) are kept in the db and rebuilt here.
 let discoveredCount = 0;
 async function syncDiscovered() {
   const defs = await db.discovered(discoveredCount);
   discoveredCount += defs.length;
-  for (const def of defs) register(buildMall(def));
+  for (const def of defs) if (!inSnapshot(def.lat, def.lng)) register(buildMall(def));
   return defs.length;
 }
 await syncDiscovered();
@@ -72,6 +83,7 @@ async function syncOverrides() {
   for (const [id, b] of base) {
     const { store } = storeById.get(id);
     const o = overrides[id];
+    Object.assign(store, b.profile, o?.profile ? { ...o.profile, vacant: false, claimed: true } : {});
     store.discount = o && 'discount' in o ? o.discount : b.discount;
     store.products.length = b.products;
     if (o?.products) store.products.push(...o.products);
@@ -80,11 +92,12 @@ async function syncOverrides() {
 
 // ---------- malls anywhere in Iran (OpenStreetMap) ----------
 
-const OVERPASS = process.env.OVERPASS_URL ? [process.env.OVERPASS_URL]
-  : ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter'];
+const OVERPASS = process.env.OVERPASS_URL ? [process.env.OVERPASS_URL] : [
+  'https://overpass-api.de/api/interpreter', 'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter',
+];
 const IRAN = { s: 25, w: 44, n: 40, e: 63.5 };
 const inIran = (lat, lng) => lat > IRAN.s && lat < IRAN.n && lng > IRAN.w && lng < IRAN.e;
-const SEEDED = MALL_DEFS.map((d) => ({ ...d, re: new RegExp(d.osm, 'i') }));
 const jobs = new Map(); // in-flight OpenStreetMap lookups, so concurrent callers share one
 
 function once(key, fn) {
@@ -134,6 +147,7 @@ function shape(el) {
 // Register the shopping malls in the 3×3 block of 0.1° tiles (≈ 30 km) around a point.
 // Each tile is fetched from OpenStreetMap once, ever; later calls read the db.
 function discoverAround(lat, lng) {
+  if (inSnapshot(lat, lng)) return Promise.resolve(0); // Tehran is already in the snapshot
   const ty = Math.floor(lat * 10), tx = Math.floor(lng * 10);
   return once(`tiles:${ty}:${tx}`, async () => {
     const tiles = [];
@@ -150,12 +164,11 @@ function discoverAround(lat, lng) {
       const name = (t['name:fa'] || t.name || '').trim().slice(0, 80);
       if (!name) continue;
       const { rings, lat: clat, lng: clng } = shape(el);
-      if (!inIran(clat, clng)) continue;
-      // Skip the hand-made Tehran malls; they already have curated data.
-      if (SEEDED.some((d) => d.re.test(name) && haversine(d, { lat: clat, lng: clng }) < 3000)) continue;
+      if (!inIran(clat, clng) || inSnapshot(clat, clng)) continue;
       defs.push(discoveredDef({
         id: `osm-${el.type[0]}${el.id}`, name, nameEn: t['name:en'], lat: clat, lng: clng, rings,
-        levels: t['building:levels'], city: t['addr:city'],
+        levels: t['building:levels'], city: t['addr:city'], phone: t.phone || t['contact:phone'],
+        hours: t.opening_hours?.match(/(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})/)?.slice(1).join(' تا '),
       }));
     }
     await db.addDiscovered(defs, tiles);
@@ -163,35 +176,9 @@ function discoverAround(lat, lng) {
   });
 }
 
-// Real building outline of a curated mall, matched by name near its approximate center.
-async function footprintOf(mall) {
-  const cached = await db.footprint(mall.id);
-  if (cached) return cached;
-  return once(`fp:${mall.id}`, async () => {
-    const names = (mall.osm || `${mall.name}|${mall.nameEn}`).replace(/"/g, '');
-    const around = `around:2500,${mall.lat},${mall.lng}`;
-    const data = await overpass(`[out:json][timeout:25];(
-      nwr(${around})["shop"="mall"]["name"~"${names}",i];
-      nwr(${around})["shop"="mall"]["name:en"~"${names}",i];
-      nwr(${around})["name"~"${names}",i]["building"~"retail|commercial|yes"];
-      nwr(${around})["amenity"="marketplace"]["name"~"${names}",i];
-    );out geom 8;`);
-    let best = null;
-    for (const el of data.elements || []) {
-      const sh = shape(el);
-      if (sh.lat == null) continue;
-      const d = haversine(sh, mall) + (sh.rings.length ? 0 : 200);
-      if (d < 8000 && (!best || d < best.d)) best = { d, ...sh };
-    }
-    const fp = best ? { lat: best.lat, lng: best.lng, rings: best.rings } : { none: true };
-    await db.setFootprint(mall.id, fp);
-    return fp;
-  });
-}
-
 function storeHaystack(store) {
-  const cat = CATEGORIES[store.category];
-  return `${store.name} ${cat.label} ${cat.keywords.join(' ')}`;
+  const cat = CATEGORIES[store.category] ?? CATEGORIES.other;
+  return `${store.name} ${store.nameEn ?? ''} ${store.brand ?? ''} ${cat.label} ${cat.keywords.join(' ')}`;
 }
 
 function storeSummary({ store, mall, floor }) {
@@ -202,11 +189,14 @@ function storeSummary({ store, mall, floor }) {
   };
 }
 
+// Compact enough to list every mall in Tehran at once; outlines come from /api/footprint/:id.
 function mallSummary(m) {
-  let stores = 0, discounts = 0, products = 0;
+  let stores = 0, discounts = 0, products = 0, units = 0;
   const categories = {};
   for (const f of m.floors) {
     for (const s of f.stores) {
+      units++;
+      if (s.vacant) continue;
       stores++;
       products += s.products.length;
       if (s.discount) discounts++;
@@ -214,28 +204,31 @@ function mallSummary(m) {
     }
   }
   return {
-    id: m.id, name: m.name, nameEn: m.nameEn, lat: m.lat, lng: m.lng, osm: m.osm,
-    rings: m.rings, discovered: !!m.discovered,
-    address: m.address, description: m.description, hours: m.hours,
+    id: m.id, name: m.name, nameEn: m.nameEn || null, lat: m.lat, lng: m.lng, kind: m.kind ?? 'mall',
+    outline: !!m.rings?.length, curated: m.curated || undefined, discovered: m.discovered || undefined,
+    area: m.neighbourhood ?? null, street: m.street ?? null, address: m.address ?? null, description: m.description ?? null,
+    hours: m.hours, phone: m.phone ?? null, website: m.website ?? null, instagram: m.instagram ?? null,
     floors: m.floors.map((f) => ({ id: f.id, name: f.name, type: f.type })),
-    stores, discounts, products, categories,
+    stores, units, discounts, products, categories,
   };
 }
 
-// Search products across stores. Returns best matches first.
+// Search products across stores, and shops themselves by name/category (most real shops haven't listed
+// products yet; those results have `product: null`). Returns best matches first.
 function searchProducts(q, { mallId, limit = 40, threshold = 1 } = {}) {
   const qt = tokens(q);
   if (!qt.length) return [];
   const out = [];
   for (const ref of storeById.values()) {
-    if (mallId && ref.mall.id !== mallId) continue;
+    if (ref.store.vacant || (mallId && ref.mall.id !== mallId)) continue;
     const storeScore = matchScore(qt, storeHaystack(ref.store));
+    if (!ref.store.products.length && storeScore >= threshold) out.push({ score: storeScore * 0.9, product: null, store: storeSummary(ref) });
     for (const p of ref.store.products) {
       const score = Math.max(matchScore(qt, `${p.name} ${p.tags}`), storeScore * 0.9);
       if (score >= threshold) out.push({ score, product: p, store: storeSummary(ref) });
     }
   }
-  out.sort((a, b) => b.score - a.score || a.product.price - b.product.price);
+  out.sort((a, b) => b.score - a.score || (a.product?.price ?? Infinity) - (b.product?.price ?? Infinity));
   return out.slice(0, limit);
 }
 
@@ -245,7 +238,7 @@ function matchStores(q, mallIds) {
   const qt = tokens(q);
   const result = new Map();
   for (const ref of storeById.values()) {
-    if (mallIds && !mallIds.has(ref.mall.id)) continue;
+    if (ref.store.vacant || (mallIds && !mallIds.has(ref.mall.id))) continue;
     let best = matchScore(qt, storeHaystack(ref.store)) >= 1 ? 0.9 : 0;
     const products = [];
     for (const p of ref.store.products) {
@@ -307,9 +300,16 @@ function rateLimited(req, limit = 60) {
   return ++h.n > limit;
 }
 
+// JSON responses are gzipped when large (the full mall list is a few hundred KB; mobile data in Iran is slow).
 function send(res, status, body) {
-  res.writeHead(status, { ...SECURITY, 'Content-Type': MIME['.json'], 'Cache-Control': 'no-store' });
-  res.end(JSON.stringify(body));
+  let data = JSON.stringify(body);
+  const headers = { ...SECURITY, 'Content-Type': MIME['.json'], 'Cache-Control': 'no-store', Vary: 'Accept-Encoding' };
+  if (data.length > 4096 && /\bgzip\b/.test(res.req?.headers['accept-encoding'] ?? '')) {
+    data = gzipSync(data);
+    headers['Content-Encoding'] = 'gzip';
+  }
+  res.writeHead(status, headers);
+  res.end(data);
 }
 
 async function readBody(req) {
@@ -386,8 +386,14 @@ async function api(req, res, url) {
   }
   if (method === 'GET' && parts[0] === 'footprint' && mallById.has(parts[1])) {
     const m = mallById.get(parts[1]);
-    if (m.discovered) return send(res, 200, { lat: m.lat, lng: m.lng, rings: m.rings });
-    return send(res, 200, await footprintOf(m));
+    return send(res, 200, m.rings?.length ? { lat: m.lat, lng: m.lng, rings: m.rings } : { none: true, lat: m.lat, lng: m.lng });
+  }
+  // Outlines of every mall near a point, for "am I inside a mall?" (passages in Amin Hozour are 30 m apart).
+  if (method === 'GET' && parts[0] === 'footprints') {
+    const lat = Number(q.get('lat')), lng = Number(q.get('lng'));
+    if (!inIran(lat, lng)) return send(res, 400, { error: 'این نقطه داخل ایران نیست' });
+    const near = malls.filter((m) => m.rings?.length && haversine(m, { lat, lng }) < 1500);
+    return send(res, 200, Object.fromEntries(near.map((m) => [m.id, m.rings])));
   }
   // Friends group: members who turned on location sharing.
   if (parts[0] === 'presence' && method === 'POST') {
@@ -453,6 +459,24 @@ async function api(req, res, url) {
         data: { mallId: ref.mall.id, storeId: sid, storeName: ref.store.name, discount: ref.store.discount },
       }]);
       return send(res, 200, ref.store);
+    }
+    // A shop registers itself in a unit (or corrects its details): name, category, phone, hours.
+    if (method === 'POST' && parts[2] === 'profile') {
+      const body = await readBody(req);
+      const name = clean(body.name, 50);
+      const category = CATEGORIES[body.category] && !['vacant', 'cinema'].includes(body.category) ? body.category : null;
+      const phone = clean(toLatinDigits(body.phone).replace(/[^\d+]/g, ''), 14);
+      const time = (t) => (/^([01]?\d|2[0-4]):[0-5]\d$/.test(toLatinDigits(t ?? '')) ? toLatinDigits(t).padStart(5, '0') : null);
+      const [open, close] = [time(body.open), time(body.close)];
+      if (name.length < 2 || !category) return send(res, 400, { error: 'نام و دسته فروشگاه لازم است' });
+      if (phone && !/^(\+98|0)\d{9,11}$/.test(phone)) return send(res, 400, { error: 'شماره تلفن معتبر نیست (مثلاً ۰۲۱۳۳۱۱۲۲۳۳)' });
+      const profile = {
+        name, category, phone: phone || null, hours: open && close ? `${open} تا ${close}` : ref.store.hours,
+        instagram: clean(body.instagram, 40).replace(/^@/, '') || null,
+      };
+      Object.assign(ref.store, profile, { vacant: false, claimed: true });
+      await db.setProfile(sid, profile);
+      return send(res, 200, { ...ref.store, ...storeSummary(ref), mallLat: ref.mall.lat, mallLng: ref.mall.lng });
     }
     if (method === 'POST' && parts[2] === 'products') {
       const body = await readBody(req);
@@ -578,6 +602,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   const stores = storeById.size;
-  console.log(`Passajh running → http://localhost:${PORT}  (${malls.length} malls, ${stores} stores)`);
+  const real = [...storeById.values()].filter((r) => !r.store.vacant).length;
+  console.log(`Passajh running → http://localhost:${PORT}  (${malls.length} malls, ${real} shops, ${stores} units)`);
   console.log(`Seller dashboard → http://localhost:${PORT}/seller`);
 });

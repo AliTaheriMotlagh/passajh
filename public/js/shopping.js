@@ -222,7 +222,7 @@ export async function openFavs() {
 
 export async function compare(p, s) {
   const box = openModal(`<h2>⚖️ مقایسه قیمت</h2><div class="sub">${esc(p.name)}</div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>`);
-  const res = await api(`/search?q=${encodeURIComponent(p.name)}`).catch(() => []);
+  const res = (await api(`/search?q=${encodeURIComponent(p.name)}`).catch(() => [])).filter((r) => r.product);
   if (!box.isConnected || $('#modal').classList.contains('hidden')) return;
   const same = res.filter((r) => r.product.name === p.name);
   const list = (same.length ? same : res.slice(0, 15)).map((r) => ({ ...r, price: finalPrice(r.product, r.store) })).sort((a, b) => a.price - b.price);

@@ -1,7 +1,10 @@
-// Seller dashboard: live customer requests, call the customer, send offers, manage discount & products.
+// Seller dashboard: register a shop in its mall (or correct the details OpenStreetMap has), live customer
+// requests, call the customer, send offers, manage discount & products.
 
 import { $, $$, esc, fa, toman, cat, finalPrice, api, toast, timeAgo, store, persist } from './ui.js';
 import { distance, fmtDist } from './geo.js';
+import { CATEGORIES } from '/shared/catalog.js';
+import { tokens, matchScore } from '/shared/text.js';
 
 let shop = null;
 let requests = [];
@@ -9,21 +12,37 @@ let fresh = new Set();
 let es = null;
 
 async function boot() {
-  const malls = await api('/malls');
-  const selMall = $('#sel-mall'), selStore = $('#sel-store');
-  selMall.innerHTML = malls.map((m) => `<option value="${m.id}">${esc(m.name)}</option>`).join('');
+  const malls = (await api('/malls')).sort((a, b) => a.name.localeCompare(b.name, 'fa'));
+  const selMall = $('#sel-mall'), selStore = $('#sel-store'), mallQ = $('#mall-q');
+  // Tehran alone has hundreds of malls and passages: filter the list as the seller types.
+  const fillMalls = (keep) => {
+    const qt = tokens(mallQ.value);
+    const list = qt.length ? malls.filter((m) => matchScore(qt, `${m.name} ${m.nameEn ?? ''} ${m.area ?? ''}`) >= 1) : malls;
+    selMall.innerHTML = list.map((m) => `<option value="${m.id}">${esc(m.name)}${m.area ? ` — ${esc(m.area)}` : ''}</option>`).join('');
+    if (keep && list.some((m) => m.id === keep)) selMall.value = keep;
+  };
+  // Shops already on the map first, then the empty units a new shop can register in.
   const fillStores = async () => {
+    if (!selMall.value) { selStore.innerHTML = ''; return; }
     const mall = await api(`/malls/${selMall.value}`);
-    selStore.innerHTML = mall.floors.filter((f) => f.stores.length).map((f) => `
-      <optgroup label="${esc(f.name)}">${f.stores.map((s) => `<option value="${s.id}">${cat(s.category).icon} ${esc(s.name)}</option>`).join('')}</optgroup>`).join('');
+    const all = mall.floors.flatMap((f) => f.stores.map((s) => ({ s, f })));
+    const real = all.filter(({ s }) => !s.vacant);
+    selStore.innerHTML = (real.length ? `<optgroup label="فروشگاه‌های ثبت‌شده">${real.map(({ s, f }) => `<option value="${s.id}">${cat(s.category).icon} ${esc(s.name)} · ${esc(f.name)}</option>`).join('')}</optgroup>` : '')
+      + mall.floors.map((f) => {
+        const empty = f.stores.filter((s) => s.vacant);
+        return empty.length ? `<optgroup label="ثبت مغازه جدید · ${esc(f.name)}">${empty.map((s) => `<option value="${s.id}">➕ ${esc(s.name)}</option>`).join('')}</optgroup>` : '';
+      }).join('');
   };
   selMall.onchange = fillStores;
-  const saved = store('seller', null);
-  if (saved) selMall.value = saved.split('-')[0];
+  mallQ.oninput = () => { fillMalls(selMall.value); fillStores(); };
+  // A link from the shopper app (?store=<unit>) or the store used last time.
+  const wanted = new URLSearchParams(location.search).get('store') || store('seller', null);
+  const pre = wanted ? await api(`/stores/${encodeURIComponent(wanted)}`).catch(() => null) : null;
+  fillMalls(pre?.mallId);
   await fillStores();
-  if (saved) selStore.value = saved;
+  if (pre) selStore.value = pre.id;
   $('#btn-login').onclick = () => login(selStore.value);
-  if (saved && new URLSearchParams(location.search).has('auto')) login(saved);
+  if (pre && new URLSearchParams(location.search).has('auto')) login(pre.id);
 
   for (const b of $$('[data-tab]')) {
     b.onclick = () => {
@@ -40,7 +59,7 @@ async function login(id) {
   persist('seller', id);
   $('#login').classList.add('hidden');
   $('#panel').classList.remove('hidden');
-  renderInfo();
+  renderInfo(shop.vacant);
   renderDiscount();
   renderProducts();
   requests = await api(`/stores/${id}/requests`);
@@ -67,16 +86,50 @@ async function login(id) {
   if (window.Notification && Notification.permission === 'default') Notification.requestPermission();
 }
 
-function renderInfo() {
+function renderInfo(editing = false) {
   const c = cat(shop.category);
+  const [open, close] = (shop.hours ?? '').match(/\d{1,2}:\d{2}/g) ?? [];
+  const cats = Object.entries(CATEGORIES).filter(([k]) => !['vacant', 'cinema'].includes(k));
   $('#store-info').innerHTML = `
     <div class="store-head">
-      <div class="store-ico" style="background:${c.color}">${c.icon}</div>
-      <div style="flex:1"><h2 style="margin:0">${esc(shop.name)}</h2>
-        <div class="sub">${c.label} · ${esc(shop.mallName)} · ${esc(shop.floorName)} · ☎️ <span dir="ltr">${fa(shop.phone)}</span></div></div>
+      <div class="store-ico" style="background:${c.color}">${c.icon || '🏬'}</div>
+      <div style="flex:1"><h2 style="margin:0">${shop.vacant ? 'ثبت مغازه شما' : esc(shop.name)}</h2>
+        <div class="sub">${shop.vacant ? `${esc(shop.name)} · ` : `${c.label} · `}${esc(shop.mallName)} · ${esc(shop.floorName)}${shop.phone ? ` · ☎️ <span dir="ltr">${fa(shop.phone)}</span>` : ''}</div></div>
+      ${shop.vacant ? '' : `<button class="btn small" id="edit">✏️ ویرایش مشخصات</button>`}
       <button class="btn small" id="logout">تغییر فروشگاه</button>
-    </div>`;
-  $('#logout').onclick = () => { es?.close(); persist('seller', null); location.reload(); };
+    </div>
+    ${editing ? `
+    <form id="profile-form">
+      ${shop.vacant ? '<p class="sub">نام و مشخصات مغازه‌تان را وارد کنید تا خریدارها آن را روی نقشه داخلی پاساژ ببینند و درخواست کالا برایتان برسد.</p>' : ''}
+      <div class="grid2">
+        <div><label>نام فروشگاه</label><input class="field" name="name" required minlength="2" maxlength="50" value="${shop.vacant ? '' : esc(shop.name)}"></div>
+        <div><label>دسته</label><select name="category" required>${cats.map(([k, v]) => `<option value="${k}" ${k === shop.category ? 'selected' : ''}>${v.icon} ${v.label}</option>`).join('')}</select></div>
+        <div><label>تلفن فروشگاه</label><input class="field" name="phone" type="tel" inputmode="tel" dir="ltr" placeholder="02133112233" value="${esc(shop.phone ?? '')}"></div>
+        <div><label>اینستاگرام (اختیاری)</label><input class="field" name="instagram" dir="ltr" placeholder="@shop" value="${esc(shop.instagram ?? '')}"></div>
+        <div><label>ساعت باز شدن</label><input class="field" name="open" type="time" value="${open ?? '10:00'}"></div>
+        <div><label>ساعت بسته شدن</label><input class="field" name="close" type="time" value="${close ?? '21:00'}"></div>
+      </div>
+      <div class="actions-row"><button class="btn primary" type="submit">${shop.vacant ? 'ثبت مغازه' : 'ذخیره'}</button>
+        ${shop.vacant ? '' : '<button class="btn" type="button" id="edit-cancel">انصراف</button>'}</div>
+    </form>` : ''}`;
+  $('#logout').onclick = () => { es?.close(); persist('seller', null); location.href = '/seller'; };
+  $('#edit')?.addEventListener('click', () => renderInfo(true));
+  $('#edit-cancel')?.addEventListener('click', () => renderInfo(false));
+  // Until a unit has a shop, there's nothing else to manage.
+  for (const id of ['#tabs', '#tab-requests']) $(id).classList.toggle('hidden', !!shop.vacant);
+  const form = $('#profile-form');
+  if (!form) return;
+  form.onsubmit = async (ev) => {
+    ev.preventDefault();
+    try {
+      const wasVacant = shop.vacant;
+      shop = await api(`/stores/${shop.id}/profile`, { method: 'POST', body: Object.fromEntries(new FormData(form)) });
+      renderInfo(false);
+      toast(wasVacant ? '✅ مغازه شما روی نقشه پاساژ ثبت شد' : '✅ ذخیره شد', 'good');
+    } catch (e) {
+      toast(esc(e.message));
+    }
+  };
 }
 
 function badge() {

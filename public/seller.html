@@ -14,6 +14,7 @@
     .wrap { max-width: 960px; margin: 0 auto; padding: 16px; }
     .seller-top { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
     .box { background: var(--panel-solid); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 14px; }
+    #store-info .store-head { flex-wrap: wrap; }
     .tabs { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
     .tabs .btn.on { background: #fff; color: #000; }
     .req-card.new { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(47, 210, 122, 0.3); }
@@ -34,7 +35,8 @@
 
     <div class="box" id="login">
       <h2 style="margin-top:0">ورود فروشنده</h2>
-      <div class="sub">فروشگاه خود را انتخاب کنید (نسخه نمایشی — احراز هویت ندارد).</div>
+      <div class="sub">پاساژ و مغازه خود را انتخاب کنید. اگر مغازه‌تان در فهرست نیست، یک واحد خالی را انتخاب و ثبت کنید (نسخه آزمایشی — احراز هویت ندارد).</div>
+      <label>جستجوی پاساژ</label><input class="field" id="mall-q" type="search" autocomplete="off" placeholder="مثلاً علاءالدین، امین حضور، تهرانپارس">
       <div class="grid2">
         <div><label>پاساژ</label><select id="sel-mall"></select></div>
         <div><label>فروشگاه</label><select id="sel-store"></select></div>
@@ -44,7 +46,7 @@
 
     <div id="panel" class="hidden">
       <div class="box" id="store-info"></div>
-      <div class="tabs">
+      <div class="tabs" id="tabs">
         <button class="btn on" data-tab="requests">📥 درخواست مشتری‌ها <b class="badge hidden" id="req-badge"></b></button>
         <button class="btn" data-tab="discount">🏷️ تخفیف</button>
         <button class="btn" data-tab="products">📦 محصولات</button>

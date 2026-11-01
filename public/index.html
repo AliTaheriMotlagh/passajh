@@ -17,7 +17,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;600;700;800;900&display=swap">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="preconnect" href="https://tiles.openfreemap.org" crossorigin>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
   <link rel="stylesheet" href="/css/app.css">
 </head>
 <body>
@@ -29,18 +30,20 @@
     <header class="topbar">
       <div class="brand">پاساژ<small>PASSAJH · IRAN</small></div>
       <div class="search">
-        <input id="city-search" type="search" autocomplete="off" enterkeyhint="search" placeholder="دنبال چه کالایی هستی؟ آیفون، مانتو، زعفران…" aria-label="جستجوی کالا">
+        <input id="city-search" type="search" autocomplete="off" enterkeyhint="search" placeholder="پاساژ، فروشگاه یا کالا… علاءالدین، موبایل، مانتو" aria-label="جستجوی پاساژ، فروشگاه یا کالا">
         <div id="city-results" class="results hidden"></div>
       </div>
       <button class="btn primary" data-action="request">📣 <span class="hide-sm">درخواست کالا</span></button>
       <button class="btn icon-lg" data-action="hub" aria-label="منوی من">☰<b class="badge hidden" data-count="offers"></b></button>
     </header>
+    <nav id="city-chips" class="area-chips" aria-label="محله‌های خرید"></nav>
     <div class="share-indicator hidden" data-action="friends">📡 موقعیت شما برای گروه نمایش داده می‌شود</div>
     <div id="discover-chip" class="discover-chip hidden"><span class="spinner"></span> جستجوی مراکز خرید این منطقه…</div>
     <div id="nav-panel" class="nav-panel hidden" aria-live="polite"></div>
     <aside id="mall-list" class="panel sheet"></aside>
     <div id="mall-card" class="panel hidden"></div>
     <div class="fabs">
+      <button id="btn-layer" class="fab small" title="ماهواره" aria-label="نقشه یا ماهواره">🛰️</button>
       <button id="btn-park" class="fab" title="ماشینم را اینجا پارک کردم" aria-label="پارک ماشین">🚗</button>
       <button id="btn-locate" class="fab" title="موقعیت من" aria-label="موقعیت من"><span class="locate-ico"></span></button>
     </div>
@@ -107,7 +110,7 @@
   <aside id="parking-panel" class="drawer hidden"></aside>
   <div id="toasts" class="toasts" aria-live="polite"></div>
 
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
   <script type="module" src="/js/app.js"></script>
 </body>
 </html>

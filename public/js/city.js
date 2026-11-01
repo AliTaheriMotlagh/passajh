@@ -1,58 +1,122 @@
-// City view: Tehran map with mall blips, real building outlines from OpenStreetMap, mall list,
-// live GPS tracking, turn-by-turn navigation to a mall, arrival detection and a parked-car pin.
+// City view: every mall, passage and bazaar in Tehran (and anywhere in Iran) on a calm vector map.
+// Malls cluster when zoomed out and show their names and real building outlines when zoomed in.
+// Live GPS tracking, turn-by-turn navigation to a mall, arrival detection and a parked-car pin.
 
 import { $, $$, esc, fa, api, toast, debounce, cat, toman, finalPrice, openModal, closeModal, openStatus, notify, askNotifications, vibrate, timeAgo, store, persist } from './ui.js';
 import { geo, distance, fmtDist, fmtDuration, fmtClock, estimate, pointInRings, shareUrl, externalNav, route, progress } from './geo.js';
+import { tokens, matchScore } from '/shared/text.js';
 
-const TEHRAN = [35.735, 51.36];
+const TEHRAN = { lat: 35.715, lng: 51.4 };
+// Same box as the server's OpenStreetMap snapshot (data/tehran.json); malls outside it are discovered live.
+const SNAPSHOT = { s: 35.56, w: 51.08, n: 35.84, e: 51.66 };
+const inSnapshot = (p) => p.lat > SNAPSHOT.s && p.lat < SNAPSHOT.n && p.lng > SNAPSHOT.w && p.lng < SNAPSHOT.e;
 const MODES = { car: '🚗 ماشین', foot: '🚶 پیاده' };
+const KIND = { mall: 'مرکز خرید', passage: 'پاساژ', bazaar: 'بازار' };
+
+// Shopping districts people ask for by name; a chip shows the malls inside each circle.
+const DISTRICTS = [
+  { name: 'امین حضور', lat: 35.6845, lng: 51.4368, r: 600 },
+  { name: 'تهرانپارس', lat: 35.7395, lng: 51.5330, r: 2300 },
+  { name: 'جمهوری و علاءالدین', lat: 35.6950, lng: 51.4110, r: 650 },
+  { name: 'لاله‌زار', lat: 35.6885, lng: 51.4225, r: 550 },
+  { name: 'بازار بزرگ', lat: 35.6755, lng: 51.4225, r: 650 },
+  { name: 'تجریش', lat: 35.8040, lng: 51.4320, r: 900 },
+  { name: 'صادقیه', lat: 35.7220, lng: 51.3330, r: 1300 },
+  { name: 'ونک', lat: 35.7580, lng: 51.4100, r: 1200 },
+];
+
+// OpenFreeMap: free vector tiles from OpenStreetMap, no API key. If it can't be reached (filtering), fall
+// back to the standard OpenStreetMap raster tiles, which load in Iran.
+const STYLE = 'https://tiles.openfreemap.org/styles/positron';
+const GLYPHS = 'https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf';
+const RASTER_STYLE = {
+  version: 8, glyphs: GLYPHS,
+  sources: { osm: { type: 'raster', tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256, maxzoom: 19, attribution: '&copy; OpenStreetMap' } },
+  layers: [{ id: 'osm', type: 'raster', source: 'osm', paint: { 'raster-saturation': -0.4, 'raster-contrast': -0.1 } }],
+};
+const SATELLITE = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+const RTL_PLUGIN = 'https://unpkg.com/@mapbox/mapbox-gl-rtl-text@0.2.3/mapbox-gl-rtl-text.min.js';
+const FONT = ['Noto Sans Bold'];
+const GREEN = '#12a150';
+const PURPLE = '#9b3dff';
+
+// Map labels in Persian where OpenStreetMap has them.
+const FA_NAME = ['coalesce', ['get', 'name:fa'], ['get', 'name']];
+// Cluster counts in Persian digits (up to 999).
+const FA_DIGITS = ['literal', [...'۰۱۲۳۴۵۶۷۸۹']];
+const digit = (e) => ['to-string', ['at', ['%', ['floor', e], 10], FA_DIGITS]];
+const faCount = (n) => ['case',
+  ['>=', n, 100], ['concat', digit(['/', n, 100]), digit(['/', n, 10]), digit(n)],
+  ['>=', n, 10], ['concat', digit(['/', n, 10]), digit(n)],
+  digit(n)];
+
+const EMPTY = { type: 'FeatureCollection', features: [] };
+const ll = (p) => [p.lng, p.lat];
+
+function circle(p, radius, n = 48) {
+  const kx = 111320 * Math.cos((p.lat * Math.PI) / 180), ky = 110540;
+  const ring = Array.from({ length: n + 1 }, (_, i) => {
+    const a = (i / n) * 2 * Math.PI;
+    return [p.lng + (radius * Math.cos(a)) / kx, p.lat + (radius * Math.sin(a)) / ky];
+  });
+  return { type: 'Feature', geometry: { type: 'Polygon', coordinates: [ring] }, properties: {} };
+}
+
+const polygon = (rings, properties = {}) => ({
+  type: 'Feature', properties,
+  geometry: { type: 'MultiPolygon', coordinates: rings.map((r) => [r.map(([lat, lng]) => [lng, lat])]) },
+});
+
+function pin(html, className = '') {
+  const el = document.createElement('div');
+  el.className = `map-pin ${className}`;
+  el.innerHTML = html;
+  return el;
+}
 
 export class CityView {
   constructor({ onEnter, onResult }) {
     this.onEnter = onEnter;
     this.onResult = onResult;
-    this.markers = new Map();
+    this.malls = [];
+    this.rings = new Map(); // mall id -> real building outline, loaded around the map and the user
     this.footprints = new Map();
-    this.layer = null;
     this.follow = false;
-    this.nav = null; // { target, mode, route, line, index, started }
+    this.nav = null; // { target, mode, route, index, started }
     this.navMode = 'car';
     this.car = store('car', null);
+    this.satellite = store('satellite', false);
     this.here = null; // id of the mall the user is standing in
     this.discovered = new Set(); // ~10 km tiles already asked about
     try { this.arrived = new Set(JSON.parse(sessionStorage.getItem('passajh.arrived')) || []); } catch { this.arrived = new Set(); }
   }
 
   async init() {
-    const map = (this.map = L.map('city-map', { zoomControl: false, attributionControl: true }).setView(TEHRAN, 12));
-    // The dark "GTA" look is the standard OSM layer recolored in CSS (.gta-tiles); CARTO's dark tiles now need an API key.
-    const gta = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19, className: 'gta-tiles', attribution: '&copy; OpenStreetMap',
-    }).addTo(map);
-    const streets = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' });
-    const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-      maxZoom: 19, attribution: 'Imagery &copy; Esri',
-    });
-    L.control.layers({ 'نقشه بازی (GTA)': gta, 'خیابان‌ها': streets, 'ماهواره': sat }, null, { position: 'topleft' }).addTo(map);
-    L.control.zoom({ position: 'topleft' }).addTo(map);
-    this.layer = L.layerGroup().addTo(map);
+    try { maplibregl.setRTLTextPlugin(RTL_PLUGIN, true); } catch { /* already set */ }
+    const last = geo.best && inSnapshot(geo.best) ? geo.best : null;
+    const map = (this.map = new maplibregl.Map({
+      container: 'city-map', style: STYLE,
+      center: ll(last ?? TEHRAN), zoom: last ? 14 : 11,
+      attributionControl: { compact: true }, maxPitch: 60, dragRotate: false, pitchWithRotate: false, touchPitch: false,
+      fadeDuration: 150,
+    }));
+    map.touchZoomRotate.disableRotation();
+    map.keyboard.disableRotation();
+    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-left');
+    this.watchStyle();
+    map.on('style.load', () => this.addLayers());
     map.on('dragstart', () => this.setFollow(false));
-    // Panning around Iran finds the malls there.
-    map.on('moveend', debounce(() => {
-      const c = map.getCenter();
-      if (map.getZoom() >= 11) this.discover(c.lat, c.lng);
-    }, 600));
+    map.on('moveend', debounce(() => this.onMoveEnd(), 350));
 
     this.malls = await api('/malls');
-    for (const m of this.malls) this.addMarker(m);
+    this.updateMalls();
+    $('#mall-list').classList.toggle('collapsed', matchMedia('(max-width: 820px)').matches);
+    this.renderChips();
     this.renderList();
-    // Start where the user was last time if that's away from the Tehran malls; otherwise show Tehran.
-    const last = geo.best;
-    if (last && !this.malls.some((m) => !m.discovered && distance(last, m) < 30000)) map.setView([last.lat, last.lng], 13);
-    else map.fitBounds(L.latLngBounds(this.malls.filter((m) => !m.discovered).map((m) => [m.lat, m.lng])).pad(0.15));
     if (this.car) this.drawCar();
 
     $('#btn-locate').addEventListener('click', () => this.locate());
+    $('#btn-layer').addEventListener('click', () => this.toggleSatellite());
     $('#mall-list').addEventListener('click', (e) => { if (e.target.closest('.sheet-handle')) e.currentTarget.classList.toggle('collapsed'); });
     $('#btn-park').addEventListener('click', () => this.carMenu());
     document.addEventListener('click', (e) => {
@@ -71,22 +135,193 @@ export class CityView {
     navigator.permissions?.query({ name: 'geolocation' })
       .then((s) => { if (s.state === 'granted') this.startTracking(false); })
       .catch(() => {});
-    // Snap mall centers to OpenStreetMap in the background, one at a time (Overpass rate limits).
-    (async () => {
-      for (const m of this.malls) await this.footprint(m).catch(() => {});
-    })();
   }
 
   mall(id) { return this.malls?.find((m) => m.id === id); }
 
-  addMarker(m) {
-    const icon = L.divIcon({
-      className: 'blip-icon', iconSize: [34, 34], iconAnchor: [17, 17],
-      html: `<div class="blip">🛍️${m.discounts > 40 ? '<span class="pulse"></span>' : ''}<span class="blip-label">${esc(m.name)}</span></div>`,
+  // ---------- map layers ----------
+
+  // Switch to raster tiles if the vector style or its tiles don't load (OpenFreeMap filtered or down).
+  watchStyle() {
+    let tileErrors = 0;
+    const fallback = () => {
+      if (this.raster) return;
+      this.raster = true;
+      this.map.setStyle(RASTER_STYLE);
+    };
+    const timer = setTimeout(() => { if (!this.map.isStyleLoaded()) fallback(); }, 9000);
+    this.map.once('load', () => clearTimeout(timer));
+    // Only network failures count: the style itself, or repeated vector-tile errors.
+    this.map.on('error', (e) => {
+      if (this.raster) return;
+      if (/openfreemap/.test(e.error?.url ?? '') && !this.map.isStyleLoaded()) fallback();
+      else if (e.sourceId === 'openmaptiles' && ++tileErrors > 6) fallback();
     });
-    const mk = L.marker([m.lat, m.lng], { icon, riseOnHover: true }).addTo(this.map);
-    mk.on('click', () => this.select(m.id));
-    this.markers.set(m.id, mk);
+  }
+
+  // Runs on every style load (setStyle drops custom layers), so all overlay data lives on `this`.
+  addLayers() {
+    const map = this.map;
+    // Persian labels on the base map.
+    for (const l of map.getStyle().layers) {
+      const tf = l.layout?.['text-field'];
+      if (l.type === 'symbol' && tf && JSON.stringify(tf).includes('name')) map.setLayoutProperty(l.id, 'text-field', FA_NAME);
+    }
+    const firstLabel = map.getStyle().layers.find((l) => l.type === 'symbol')?.id;
+    map.addSource('pj-sat', { type: 'raster', tiles: [SATELLITE], tileSize: 256, maxzoom: 19, attribution: 'Imagery &copy; Esri' });
+    map.addLayer({ id: 'pj-sat', type: 'raster', source: 'pj-sat', layout: { visibility: this.satellite ? 'visible' : 'none' } }, firstLabel);
+
+    map.addSource('pj-outlines', { type: 'geojson', data: this.outlineData() });
+    map.addLayer({ id: 'pj-outline-fill', type: 'fill', source: 'pj-outlines', minzoom: 14.5, paint: { 'fill-color': GREEN, 'fill-opacity': 0.1 } });
+    map.addLayer({ id: 'pj-outline-line', type: 'line', source: 'pj-outlines', minzoom: 14.5, paint: { 'line-color': GREEN, 'line-width': 1.5, 'line-opacity': 0.7 } });
+
+    map.addSource('pj-selected', { type: 'geojson', data: this.selectedData() });
+    map.addLayer({ id: 'pj-selected-fill', type: 'fill', source: 'pj-selected', paint: { 'fill-color': GREEN, 'fill-opacity': 0.22 } });
+    map.addLayer({ id: 'pj-selected-line', type: 'line', source: 'pj-selected', paint: { 'line-color': GREEN, 'line-width': 3 } });
+
+    map.addSource('pj-acc', { type: 'geojson', data: this.accData() });
+    map.addLayer({ id: 'pj-acc', type: 'fill', source: 'pj-acc', paint: { 'fill-color': '#2f7fe0', 'fill-opacity': 0.12 } });
+    map.addLayer({ id: 'pj-acc-line', type: 'line', source: 'pj-acc', paint: { 'line-color': '#2f7fe0', 'line-width': 1, 'line-opacity': 0.4 } });
+
+    map.addSource('pj-route', { type: 'geojson', data: this.routeData() });
+    map.addLayer({ id: 'pj-route-casing', type: 'line', source: 'pj-route', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#4b1a85', 'line-width': 9, 'line-opacity': 0.35 } });
+    map.addLayer({ id: 'pj-route', type: 'line', source: 'pj-route', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': PURPLE, 'line-width': 5 } });
+    this.dashRoute();
+
+    map.addSource('pj-malls', { type: 'geojson', data: this.mallData(), cluster: true, clusterRadius: 80, clusterMaxZoom: 13 });
+    map.addLayer({
+      id: 'pj-clusters', type: 'circle', source: 'pj-malls', filter: ['has', 'point_count'],
+      paint: {
+        'circle-color': GREEN, 'circle-opacity': 0.9, 'circle-stroke-color': '#fff', 'circle-stroke-width': 2.5,
+        'circle-radius': ['step', ['get', 'point_count'], 13, 10, 16, 50, 20, 150, 24],
+      },
+    });
+    map.addLayer({
+      id: 'pj-cluster-count', type: 'symbol', source: 'pj-malls', filter: ['has', 'point_count'],
+      layout: { 'text-field': faCount(['get', 'point_count']), 'text-font': FONT, 'text-size': 13, 'text-allow-overlap': true },
+      paint: { 'text-color': '#fff' },
+    });
+    map.addLayer({
+      id: 'pj-mall', type: 'circle', source: 'pj-malls', filter: ['!', ['has', 'point_count']],
+      paint: {
+        'circle-color': ['case', ['==', ['get', 'id'], this.selected ?? ''], '#f59e0b', GREEN],
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, ['case', ['get', 'big'], 6, 4.5], 17, ['case', ['get', 'big'], 10, 8]],
+        'circle-stroke-color': '#fff', 'circle-stroke-width': 2,
+      },
+    });
+    map.addLayer({
+      id: 'pj-mall-label', type: 'symbol', source: 'pj-malls', filter: ['!', ['has', 'point_count']], minzoom: 14,
+      layout: {
+        'text-field': ['get', 'name'], 'text-font': FONT, 'text-size': ['interpolate', ['linear'], ['zoom'], 14, 11, 18, 14],
+        'text-anchor': 'top', 'text-offset': [0, 0.9], 'text-max-width': 9, 'text-optional': true,
+      },
+      paint: { 'text-color': '#16432a', 'text-halo-color': '#fff', 'text-halo-width': 1.6 },
+    });
+
+    if (this.layersBound) return;
+    this.layersBound = true;
+    map.on('click', 'pj-clusters', async (e) => {
+      const f = e.features[0];
+      const zoom = await map.getSource('pj-malls').getClusterExpansionZoom(f.properties.cluster_id);
+      map.easeTo({ center: f.geometry.coordinates, zoom: zoom + 0.3, duration: 500 });
+    });
+    map.on('click', 'pj-mall', (e) => this.select(e.features[0].properties.id));
+    map.on('click', 'pj-outline-fill', (e) => {
+      if (!map.queryRenderedFeatures(e.point, { layers: ['pj-mall'] }).length) this.select(e.features[0].properties.id);
+    });
+    for (const id of ['pj-clusters', 'pj-mall', 'pj-outline-fill']) {
+      map.on('mouseenter', id, () => { map.getCanvas().style.cursor = 'pointer'; });
+      map.on('mouseleave', id, () => { map.getCanvas().style.cursor = ''; });
+    }
+  }
+
+  setData(source, data) {
+    this.map?.getSource(source)?.setData(data);
+  }
+
+  mallData() {
+    return {
+      type: 'FeatureCollection',
+      features: this.malls.map((m) => ({
+        type: 'Feature', geometry: { type: 'Point', coordinates: ll(m) },
+        properties: { id: m.id, name: m.name, big: !!m.curated || m.stores >= 8 },
+      })),
+    };
+  }
+
+  outlineData() {
+    return { type: 'FeatureCollection', features: [...this.rings].filter(([, r]) => r?.length).map(([id, r]) => polygon(r, { id })) };
+  }
+
+  selectedData() {
+    const m = this.mall(this.selected);
+    const r = m && this.rings.get(m.id);
+    return { type: 'FeatureCollection', features: r?.length ? [polygon(r, { id: m.id })] : [] };
+  }
+
+  accData() {
+    const p = geo.pos;
+    return p ? { type: 'FeatureCollection', features: [circle(p, Math.min(p.accuracy, 3000))] } : EMPTY;
+  }
+
+  routeData() {
+    const r = this.nav?.route;
+    if (!r) return EMPTY;
+    return { type: 'Feature', properties: { real: r.real }, geometry: { type: 'LineString', coordinates: r.coords.map(([lat, lng]) => [lng, lat]) } };
+  }
+
+  // A straight-line estimate (no router answered) is dashed. Dashes can't be data-driven, so set per route.
+  dashRoute() {
+    if (this.map.getLayer('pj-route')) this.map.setPaintProperty('pj-route', 'line-dasharray', this.nav?.route && !this.nav.route.real ? [1.5, 1.5] : null);
+  }
+
+  updateMalls() {
+    this.setData('pj-malls', this.mallData());
+  }
+
+  restyleSelected() {
+    if (!this.map.getLayer('pj-mall')) return;
+    this.map.setPaintProperty('pj-mall', 'circle-color', ['case', ['==', ['get', 'id'], this.selected ?? ''], '#f59e0b', GREEN]);
+    this.setData('pj-selected', this.selectedData());
+  }
+
+  toggleSatellite() {
+    this.satellite = !this.satellite;
+    persist('satellite', this.satellite);
+    if (this.map.getLayer('pj-sat')) this.map.setLayoutProperty('pj-sat', 'visibility', this.satellite ? 'visible' : 'none');
+    $('#btn-layer').classList.toggle('on', this.satellite);
+    $('#btn-layer').title = this.satellite ? 'نقشه' : 'ماهواره';
+  }
+
+  onMoveEnd() {
+    this.renderList();
+    const c = this.map.getCenter();
+    const p = { lat: c.lat, lng: c.lng };
+    if (this.map.getZoom() >= 11 && !inSnapshot(p)) this.discover(p.lat, p.lng);
+    if (this.map.getZoom() >= 14) this.loadOutlines(p, 'map');
+    this.updateChips();
+  }
+
+  // Real outlines of the malls within ~1.5 km of a point: around the map center, and around the user for
+  // arrival detection (`key` keeps the two from refetching each other).
+  async loadOutlines(p, key) {
+    this.outlinesAt ??= {};
+    const last = this.outlinesAt[key];
+    if (last && distance(last, p) < 700) return;
+    this.outlinesAt[key] = p;
+    try {
+      const rings = await api(`/footprints?lat=${p.lat.toFixed(5)}&lng=${p.lng.toFixed(5)}`);
+      let added = 0;
+      for (const [id, r] of Object.entries(rings)) {
+        if (!this.rings.has(id)) added++;
+        this.rings.set(id, r);
+        const m = this.mall(id);
+        if (m) m.rings = r;
+      }
+      if (added) this.setData('pj-outlines', this.outlineData());
+    } catch {
+      this.outlinesAt[key] = null;
+    }
   }
 
   // Distance in meters from the live (or last known) position, or null.
@@ -94,21 +329,79 @@ export class CityView {
     return geo.best ? distance(geo.best, m) : null;
   }
 
+  // ---------- list & districts ----------
+
+  renderChips() {
+    const box = $('#city-chips');
+    box.innerHTML = '<button class="area-chip" data-near>📍 نزدیک من</button>'
+      + DISTRICTS.map((d, i) => `<button class="area-chip" data-district="${i}">${esc(d.name)}</button>`).join('');
+    $('[data-near]', box).onclick = () => this.nearMe();
+    for (const b of $$('[data-district]', box)) b.onclick = () => this.showDistrict(DISTRICTS[b.dataset.district]);
+    this.updateChips();
+  }
+
+  // Highlight the district the map is showing.
+  updateChips() {
+    const c = this.map.getCenter();
+    const zoom = this.map.getZoom();
+    for (const b of $$('#city-chips [data-district]')) {
+      const d = DISTRICTS[b.dataset.district];
+      const away = distance(d, { lat: c.lat, lng: c.lng });
+      b.classList.toggle('on', (d === this.district && away < d.r * 2) || (zoom >= 13 && away < d.r));
+    }
+    $('#city-chips [data-near]')?.classList.toggle('on', this.follow);
+  }
+
+  showDistrict(d) {
+    this.district = d;
+    const inside = this.malls.filter((m) => distance(d, m) < d.r);
+    this.setFollow(false);
+    $('#mall-card').classList.add('hidden');
+    $('#mall-list').classList.remove('collapsed');
+    const pts = inside.length ? inside : [d];
+    const b = new maplibregl.LngLatBounds(ll(pts[0]), ll(pts[0]));
+    for (const m of pts) b.extend(ll(m));
+    this.map.fitBounds(b, { padding: this.padding(), maxZoom: 16.5, duration: 900 });
+  }
+
+  async nearMe() {
+    if (geo.pos) {
+      this.setFollow(true);
+      this.map.flyTo({ center: ll(geo.pos), zoom: Math.max(this.map.getZoom(), 15), duration: 900 });
+      $('#mall-list').classList.remove('collapsed');
+      return;
+    }
+    await this.startTracking(true);
+  }
+
+  // Room for the top bar and chips, and the bottom sheet on phones.
+  padding() {
+    const phone = matchMedia('(max-width: 820px)').matches;
+    const sheet = $('#mall-list').classList.contains('collapsed') ? 70 : innerHeight * 0.38 + 20;
+    return phone ? { top: 170, bottom: sheet, left: 30, right: 30 } : { top: 130, bottom: 40, left: 40, right: 400 };
+  }
+
+  // Malls in view, nearest first (to the user, or to the map center).
   renderList() {
-    const items = [...this.malls];
-    if (geo.best) items.sort((a, b) => this.dist(a) - this.dist(b));
+    const b = this.map.getBounds();
+    const c = this.map.getCenter();
+    const from = geo.best && b.contains(ll(geo.best)) ? geo.best : { lat: c.lat, lng: c.lng };
+    const inView = this.malls.filter((m) => b.contains(ll(m)));
+    inView.sort((a, b2) => distance(from, a) - distance(from, b2));
+    const items = inView.slice(0, 40);
+    const title = inView.length ? `${fa(inView.length)} مرکز خرید در این محدوده` : 'مرکز خریدی در این محدوده نیست';
     $('#mall-list').innerHTML = `
-      <button class="sheet-handle" aria-label="باز و بسته کردن فهرست">${geo.best ? 'نزدیک‌ترین‌ها به شما' : 'مراکز خرید'}</button>
-      <h3>🗺️ مراکز خرید (${fa(items.length)})${geo.best && !geo.pos ? ' <span class="chip">آخرین موقعیت شما</span>' : ''}</h3>
+      <button class="sheet-handle" aria-label="باز و بسته کردن فهرست">${title}</button>
+      <h3>${title}${inView.length > items.length ? ` · ${fa(items.length)} نزدیک‌ترین` : ''}</h3>
+      ${inView.length ? '' : '<div class="empty-state">🗺️<br>نقشه را جابه‌جا کنید یا یکی از محله‌های بالا را بزنید.</div>'}
       ${items.map((m) => {
         const st = openStatus(m.hours);
         const d = this.dist(m);
+        const sub = [KIND[m.kind] ?? 'مرکز خرید', m.area, m.stores ? `${fa(m.stores)} فروشگاه` : null].filter(Boolean).map(esc).join(' · ');
         return `
         <div class="mall-item ${m.id === this.selected ? 'active' : ''}" data-id="${m.id}">
-          <div class="row"><b>${esc(m.name)}</b>${m.id === this.here ? '<span class="chip green">📍 اینجا هستید</span>' : m.discounts ? `<span class="chip">${fa(m.discounts)} تخفیف</span>` : ''}</div>
-          <div class="meta">${fa(m.floors.length)} طبقه · ${fa(m.stores)} فروشگاه · ${fa(m.products)} کالا
-            ${st ? ` · <span class="${st.open ? 'open' : 'closed'}">${st.text}</span>` : ''}</div>
-          ${d != null ? `<div class="meta"><span class="chip green">${fmtDist(d)}</span> 🚗 ${fmtDuration(estimate(d, 'car'))}${d < 4000 ? ` · 🚶 ${fmtDuration(estimate(d, 'foot'))}` : ''}</div>` : ''}
+          <div class="row"><b>${esc(m.name)}</b>${m.id === this.here ? '<span class="chip green">📍 اینجا هستید</span>' : d != null ? `<span class="dist">${fmtDist(d)}</span>` : ''}</div>
+          <div class="meta">${sub}${st ? ` · <span class="${st.open ? 'open' : 'closed'}">${st.text}</span>` : ''}${m.discounts ? ` · <span class="chip">${fa(m.discounts)} تخفیف</span>` : ''}</div>
         </div>`;
       }).join('')}`;
     for (const el of $$('.mall-item')) el.addEventListener('click', () => this.select(el.dataset.id));
@@ -116,83 +409,82 @@ export class CityView {
 
   async select(id) {
     const m = this.mall(id);
+    if (!m) return;
     this.selected = id;
     this.setFollow(false);
-    for (const [mid, mk] of this.markers) mk.getElement()?.querySelector('.blip')?.classList.toggle('active', mid === id);
-    this.renderList();
-    this.map.flyTo([m.lat, m.lng], 17, { duration: 1.2 });
-    this.showCard(m, null);
-    const fp = await this.footprint(m).catch(() => null);
-    if (this.selected === id) this.showCard(m, fp);
+    this.restyleSelected();
+    $('#mall-list').classList.add('collapsed');
+    // On phones the card covers the bottom of the map, so keep the mall above it.
+    const phone = matchMedia('(max-width: 820px)').matches;
+    this.map.flyTo({ center: ll(m), zoom: Math.max(this.map.getZoom(), 16.5), duration: 900, offset: [0, phone ? -110 : 0] });
+    this.showCard(m);
+    await this.footprint(m).catch(() => null);
+    if (this.selected === id) this.restyleSelected();
   }
 
-  showCard(m, fp) {
-    this.cardFp = fp;
-    const top = Object.entries(m.categories).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  showCard(m) {
+    const top = Object.entries(m.categories).sort((a, b) => b[1] - a[1]).slice(0, 4);
     const st = openStatus(m.hours);
     const d = this.dist(m);
+    const tel = m.phone?.split(/[;,]/)[0].replace(/[^\d+]/g, '');
+    const insta = m.instagram?.replace(/^.*instagram\.com\//, '').replace(/[/@]/g, '');
     const card = $('#mall-card');
     card.classList.remove('hidden');
     card.innerHTML = `
-      <button class="close-x" id="card-close">✕</button>
+      <button class="close-x" id="card-close" aria-label="بستن">✕</button>
       <h2>${esc(m.name)}</h2>
-      <div class="en">${esc(m.nameEn)}</div>
-      <p>${esc(m.description)}</p>
-      <div class="sub">📍 ${esc(m.address)}<br>🕘 ساعت کاری: ${esc(m.hours)}
+      <div class="sub">${[KIND[m.kind] ?? 'مرکز خرید', m.area, m.street].filter(Boolean).map(esc).join(' · ')}
         ${st ? ` · <b class="${st.open ? 'open' : 'closed'}">${st.text}</b>` : ''}</div>
+      ${m.description ? `<p>${esc(m.description)}</p>` : ''}
       ${d != null ? `<div class="sub dist-line">${m.id === this.here ? '📍 الان اینجا هستید' : `📏 ${fmtDist(d)} از شما · 🚗 حدود ${fmtDuration(estimate(d, 'car'))}${d < 4000 ? ` · 🚶 ${fmtDuration(estimate(d, 'foot'))}` : ''}`}</div>` : ''}
-      <div class="stats">
-        <div class="stat"><b>${fa(m.floors.length)}</b><span>طبقه</span></div>
-        <div class="stat"><b>${fa(m.stores)}</b><span>فروشگاه</span></div>
-        <div class="stat"><b>${fa(m.discounts)}</b><span>تخفیف</span></div>
-        <div class="stat"><b>${fa(m.products)}</b><span>کالا</span></div>
+      <div class="facts">
+        <span>🏬 ${fa(m.floors.length)} طبقه</span>
+        <span>🛍️ ${m.stores ? `${fa(m.stores)} فروشگاه ثبت‌شده` : 'فروشگاهی ثبت نشده'}</span>
+        ${m.discounts ? `<span class="deal-text">🏷️ ${fa(m.discounts)} تخفیف</span>` : ''}
+        ${m.hours ? `<span>🕘 ${fa(m.hours)}</span>` : ''}
       </div>
-      <div class="sub">${top.map(([k, n]) => `${cat(k).icon} ${cat(k).label} ${fa(n)}`).join(' · ')}</div>
-      <div class="coords" style="margin-top:8px">⌖ ${m.lat.toFixed(5)}, ${m.lng.toFixed(5)}
-        ${fp === null ? ' · در حال دریافت ساختمان از OSM…' : fp ? ' · ✓ ساختمان واقعی از OpenStreetMap' : ' · مرکز تقریبی'}</div>
+      ${top.length ? `<div class="sub">${top.map(([k, n]) => `${cat(k).icon} ${cat(k).label} ${fa(n)}`).join(' · ')}</div>` : ''}
       <div class="card-actions">
-        <button class="btn primary" id="card-enter">🚶 ورود به پاساژ</button>
-        ${m.id === this.here ? '' : `<button class="btn purple" data-nav="${m.id}">🧭 مسیریابی از موقعیت من</button>`}
-        <button class="btn" id="card-share" title="اشتراک‌گذاری">📤</button>
+        <button class="btn primary" id="card-enter">🚶 نقشه داخلی</button>
+        ${m.id === this.here ? '' : `<button class="btn purple" data-nav="${m.id}">🧭 مسیریابی</button>`}
+        ${tel ? `<a class="btn icon" href="tel:${esc(tel)}" aria-label="تماس">📞</a>` : ''}
+        <button class="btn icon" id="card-share" aria-label="اشتراک‌گذاری">📤</button>
       </div>
-      <div class="ext-links">باز کردن در: ${externalNav(m, m.name).map((x) => `<a target="_blank" rel="noopener" href="${esc(x.href)}">${esc(x.label)}</a>`).join(' · ')}</div>`;
+      <div class="ext-links">باز کردن در: ${externalNav(m, m.name).map((x) => `<a target="_blank" rel="noopener" href="${esc(x.href)}">${esc(x.label)}</a>`).join(' · ')}
+        ${insta ? ` · <a target="_blank" rel="noopener" href="https://instagram.com/${encodeURIComponent(insta)}">اینستاگرام</a>` : ''}
+        ${m.website ? ` · <a target="_blank" rel="noopener" href="${esc(/^https?:/.test(m.website) ? m.website : `https://${m.website}`)}">وب‌سایت</a>` : ''}</div>
+      <div class="source">منبع: OpenStreetMap${m.stores ? '' : ' · فروشنده هستید؟ <a href="/seller">مغازه‌تان را ثبت کنید</a>'}</div>`;
     $('#card-enter').addEventListener('click', () => this.onEnter(m.id));
-    $('#card-close').addEventListener('click', () => card.classList.add('hidden'));
+    $('#card-close').addEventListener('click', () => {
+      card.classList.add('hidden');
+      this.selected = null;
+      this.restyleSelected();
+      this.renderList();
+    });
     $('#card-share').addEventListener('click', () => this.share(m, `${m.name} — پاساژ`, `${location.origin}/#/mall/${m.id}`));
   }
 
-  // Fetch the mall's real building outline from OpenStreetMap and move its center onto it.
+  // The mall's real building outline (sets m.rings, which the indoor view uses to place the GPS dot).
   footprint(m) {
     if (!this.footprints.has(m.id)) {
-      const p = this.loadFootprint(m);
+      const p = (async () => {
+        const fp = this.rings.has(m.id) ? { rings: this.rings.get(m.id) } : await api(`/footprint/${m.id}`);
+        const rings = fp.rings ?? [];
+        m.rings = rings;
+        if (!rings.length) return false;
+        if (!this.rings.has(m.id)) {
+          this.rings.set(m.id, rings);
+          this.setData('pj-outlines', this.outlineData());
+        }
+        return true;
+      })();
       p.catch(() => this.footprints.delete(m.id));
       this.footprints.set(m.id, p);
     }
     return this.footprints.get(m.id);
   }
 
-  // The server looks the outline up on OpenStreetMap (Overpass is often blocked inside Iran) and caches it.
-  async loadFootprint(m) {
-    const fp = m.discovered ? { lat: m.lat, lng: m.lng, rings: m.rings } : await api(`/footprint/${m.id}`);
-    const rings = fp.rings ?? [];
-    if (fp.none || fp.lat == null) {
-      L.circle([m.lat, m.lng], { radius: 90, color: '#f5c518', weight: 2, dashArray: '6 6', fillOpacity: 0.05, interactive: false }).addTo(this.layer);
-      return false;
-    }
-    m.lat = fp.lat;
-    m.lng = fp.lng;
-    m.rings = rings;
-    this.markers.get(m.id)?.setLatLng([m.lat, m.lng]);
-    for (const r of rings) {
-      L.polygon(r, { color: '#2fd27a', weight: 2.5, fillColor: '#2fd27a', fillOpacity: 0.18, className: 'footprint' })
-        .bindTooltip(m.name, { sticky: true }).on('click', () => this.select(m.id)).addTo(this.layer);
-    }
-    if (!rings.length) return false;
-    L.marker([m.lat, m.lng], { icon: L.divIcon({ className: 'center-mark', html: '⌖', iconSize: [22, 22], iconAnchor: [11, 11] }), interactive: false }).addTo(this.layer);
-    return true;
-  }
-
-  // ---------- malls anywhere in Iran ----------
+  // ---------- malls outside Tehran ----------
 
   // Ask the server for the malls around a point (it reads OpenStreetMap once per ~30 km area).
   async discover(lat, lng) {
@@ -205,15 +497,11 @@ export class CityView {
       const { malls, partial } = await api(`/discover?lat=${lat.toFixed(4)}&lng=${lng.toFixed(4)}`);
       if (partial) this.discovered.delete(key);
       const fresh = malls.filter((m) => !this.mall(m.id));
-      for (const m of fresh) {
-        this.malls.push(m);
-        this.addMarker(m);
-        this.footprint(m);
-      }
       if (fresh.length) {
+        this.malls.push(...fresh);
+        this.updateMalls();
         this.renderList();
         toast(`🛍️ ${fa(fresh.length)} مرکز خرید در این منطقه پیدا شد`, 'good', 3000);
-        this.onDiscover?.(fresh);
       }
     } catch {
       this.discovered.delete(key);
@@ -229,7 +517,7 @@ export class CityView {
     if (!geo.active) return this.startTracking(true);
     if (!this.follow) {
       this.setFollow(true);
-      if (geo.pos) this.map.flyTo([geo.pos.lat, geo.pos.lng], Math.max(this.map.getZoom(), 16));
+      if (geo.pos) this.map.flyTo({ center: ll(geo.pos), zoom: Math.max(this.map.getZoom(), 16), duration: 800 });
       return;
     }
     if (this.nav) return toast('در حین مسیریابی، ردیابی موقعیت روشن می‌ماند');
@@ -244,10 +532,13 @@ export class CityView {
       const p = await geo.start();
       if (announce) {
         this.setFollow(true);
-        this.map.flyTo([p.lat, p.lng], 15);
+        this.map.flyTo({ center: ll(p), zoom: 15, duration: 1000 });
+        $('#mall-list').classList.remove('collapsed');
         const nearest = [...this.malls].sort((a, b) => this.dist(a) - this.dist(b))[0];
-        toast(`📍 نزدیک‌ترین پاساژ: <b>${esc(nearest.name)}</b> (${fmtDist(this.dist(nearest))})
-          <div class="actions-row" style="margin:6px 0 0"><button class="btn small purple" data-nav="${nearest.id}">🧭 مسیریابی</button></div>`, 'good', 7000);
+        if (nearest && this.dist(nearest) < 20000) {
+          toast(`📍 نزدیک‌ترین: <b>${esc(nearest.name)}</b> (${fmtDist(this.dist(nearest))})
+            <div class="actions-row" style="margin:6px 0 0"><button class="btn small purple" data-nav="${nearest.id}">🧭 مسیریابی</button></div>`, 'good', 6000);
+        }
       }
     } catch (e) {
       if (announce) toast(esc(e.message), '', 8000);
@@ -260,6 +551,7 @@ export class CityView {
   setFollow(on) {
     this.follow = on && geo.active;
     this.renderLocate();
+    $('#city-chips [data-near]')?.classList.toggle('on', this.follow);
   }
 
   renderLocate() {
@@ -271,46 +563,73 @@ export class CityView {
 
   onPosition() {
     const p = geo.pos;
-    const ll = [p.lat, p.lng];
     if (!this.meMarker) {
-      this.meCircle = L.circle(ll, { radius: p.accuracy, color: '#3b8fd9', weight: 1, fillOpacity: 0.12, interactive: false }).addTo(this.map);
-      this.meMarker = L.marker(ll, {
-        zIndexOffset: 1000,
-        icon: L.divIcon({ className: 'blip-icon', html: '<div class="me-blip"><i class="cone"></i></div>', iconSize: [18, 18], iconAnchor: [9, 9] }),
-      }).addTo(this.map).on('click', () => this.meMenu());
+      this.meMarker = new maplibregl.Marker({ element: pin('<div class="me-blip"><i class="cone"></i></div>', 'me-pin'), rotationAlignment: 'map' })
+        .setLngLat(ll(p)).addTo(this.map);
+      this.meMarker.getElement().addEventListener('click', (e) => { e.stopPropagation(); this.meMenu(); });
+      this.meAt = p;
     } else {
-      this.meMarker.setLatLng(ll);
-      this.meCircle.setLatLng(ll).setRadius(p.accuracy);
+      this.glide(p);
     }
+    this.setData('pj-acc', this.accData());
     this.drawHeading();
-    if (this.follow) this.map.panTo(ll, { animate: true, duration: 0.5 });
+    if (this.follow) this.camera(p);
     if (this.nav) this.updateNav();
     if (!this.discoverAt || distance(this.discoverAt, p) > 5000) {
       this.discoverAt = p;
-      this.discover(p.lat, p.lng);
+      if (!inSnapshot(p)) this.discover(p.lat, p.lng);
     }
-    this.checkArrival();
+    this.loadOutlines(p, 'me').then(() => this.checkArrival());
     this.checkNearby();
     if (!this.listAt || distance(this.listAt, p) > 100) {
       this.listAt = p;
       this.renderList();
       const m = this.mall(this.selected);
-      if (m && !$('#mall-card').classList.contains('hidden')) this.showCard(m, this.cardFp);
+      if (m && !$('#mall-card').classList.contains('hidden')) this.showCard(m);
     }
   }
 
+  // Slide the blue dot to the new fix instead of jumping.
+  glide(to) {
+    const from = this.meAt ?? to;
+    cancelAnimationFrame(this.glideFrame);
+    if (distance(from, to) > 300) {
+      this.meAt = to;
+      return this.meMarker.setLngLat(ll(to));
+    }
+    const t0 = performance.now();
+    const step = (t) => {
+      const k = Math.min(1, (t - t0) / 800), e = 1 - (1 - k) ** 3;
+      this.meAt = { lat: from.lat + (to.lat - from.lat) * e, lng: from.lng + (to.lng - from.lng) * e };
+      this.meMarker?.setLngLat(ll(this.meAt));
+      if (k < 1) this.glideFrame = requestAnimationFrame(step);
+    };
+    this.glideFrame = requestAnimationFrame(step);
+  }
+
+  // Follow the user; while navigating, heading-up and tilted like a car navigator.
+  camera(p) {
+    const driving = this.nav?.started;
+    const b = geo.bearing;
+    this.map.easeTo({
+      center: ll(p), duration: 800, easing: (t) => t,
+      ...(driving ? { zoom: Math.max(this.map.getZoom(), 16.5), pitch: 45, ...(b != null ? { bearing: b } : {}) } : {}),
+    });
+  }
+
   drawHeading() {
-    const cone = this.meMarker?.getElement()?.querySelector('.cone');
+    const el = this.meMarker?.getElement();
+    const cone = el?.querySelector('.cone');
     if (!cone) return;
     const b = geo.bearing;
     cone.style.display = b == null ? 'none' : '';
-    if (b != null) cone.style.transform = `rotate(${b}deg)`;
+    if (b != null) this.meMarker.setRotation(b);
   }
 
   clearMe() {
     this.meMarker?.remove();
-    this.meCircle?.remove();
-    this.meMarker = this.meCircle = null;
+    this.meMarker = this.meAt = null;
+    this.setData('pj-acc', EMPTY);
     this.follow = false;
     this.renderLocate();
   }
@@ -323,11 +642,11 @@ export class CityView {
       <h2>📍 موقعیت شما</h2>
       <div class="coords">${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}</div>
       <div class="sub">دقت: حدود ${fmtDist(p.accuracy)}${p.speed > 0.5 ? ` · سرعت ${fa(Math.round(p.speed * 3.6))} کیلومتر بر ساعت` : ''}
-        <br>نزدیک‌ترین پاساژ: <b>${esc(nearest.name)}</b> (${fmtDist(this.dist(nearest))})</div>
+        ${nearest ? `<br>نزدیک‌ترین: <b>${esc(nearest.name)}</b> (${fmtDist(this.dist(nearest))})` : ''}</div>
       <div class="actions-row">
         <button class="btn primary" id="me-share">📤 ارسال موقعیتم برای دوست</button>
         <button class="btn" id="me-park">🚗 ماشینم اینجاست</button>
-        <button class="btn purple" data-nav="${nearest.id}">🧭 برو به ${esc(nearest.name)}</button>
+        ${nearest ? `<button class="btn purple" data-nav="${nearest.id}">🧭 برو به ${esc(nearest.name)}</button>` : ''}
       </div>`);
     $('#me-share', box).onclick = () => this.share(p, 'موقعیت من');
     $('#me-park', box).onclick = () => { closeModal(); this.parkCar(); };
@@ -350,10 +669,14 @@ export class CityView {
 
   // ---------- arrival & nearby ----------
 
+  // Inside a real outline, or right at a mall that has none. A rough fix can't tell neighbouring passages apart.
   checkArrival() {
     const p = geo.pos;
-    if (!p || !this.malls) return;
-    const at = this.malls.find((m) => (m.rings?.length ? pointInRings(p, m.rings) || distance(p, m) < 50 : distance(p, m) < 120));
+    if (!p || !this.malls.length || p.accuracy > 100) return;
+    const near = this.malls.filter((m) => Math.abs(m.lat - p.lat) < 0.005 && Math.abs(m.lng - p.lng) < 0.006);
+    const rings = (m) => this.rings.get(m.id) ?? m.rings;
+    const at = near.find((m) => rings(m)?.length && pointInRings(p, rings(m)))
+      ?? near.filter((m) => !rings(m)?.length && distance(p, m) < Math.min(80, 30 + p.accuracy / 2)).sort((a, b) => distance(p, a) - distance(p, b))[0];
     if ((at?.id ?? null) === this.here) return;
     this.here = at?.id ?? null;
     this.renderList();
@@ -366,9 +689,9 @@ export class CityView {
     this.arrived.add(m.id);
     try { sessionStorage.setItem('passajh.arrived', JSON.stringify([...this.arrived])); } catch { /* ignore */ }
     vibrate([200, 100, 200]);
-    notify(`به ${m.name} رسیدید 🛍️`, `${m.discounts} فروشگاه تخفیف دارند. نقشه داخلی را باز کنید.`, `arrive-${m.id}`);
+    notify(`به ${m.name} رسیدید 🛍️`, m.stores ? `${m.stores} فروشگاه ثبت‌شده. نقشه داخلی را باز کنید.` : 'نقشه داخلی را باز کنید.', `arrive-${m.id}`);
     if (location.hash.startsWith('#/mall/')) return;
-    const html = `📍 به <b>${esc(m.name)}</b> رسیدید! ${fa(m.discounts)} فروشگاه تخفیف دارند.`;
+    const html = `📍 به <b>${esc(m.name)}</b> رسیدید!${m.discounts ? ` ${fa(m.discounts)} فروشگاه تخفیف دارند.` : ''}`;
     // Don't cover a form or panel the user is in the middle of; offer it as a toast instead.
     if (!$('#modal').classList.contains('hidden') || $$('.drawer:not(.hidden)').length) {
       const t = toast(`${html}<div class="actions-row" style="margin:6px 0 0"><button class="btn small primary" data-enter="${m.id}">🚶 نقشه داخلی</button></div>`, 'good', 10000);
@@ -377,12 +700,12 @@ export class CityView {
     }
     const box = openModal(`
       <h2>📍 به ${esc(m.name)} رسیدید</h2>
-      <div class="sub">${html}<br>نقشه داخلی با موقعیت واقعی شما باز شود؟ از جلوی هر مغازه‌ای که تخفیف دارد رد شوید، کوپنش را می‌گیرید.</div>
+      <div class="sub">${html}<br>نقشه داخلی با موقعیت واقعی شما باز شود؟</div>
       <div class="actions-row"><button class="btn primary" id="arr-enter">🚶 ورود به نقشه داخلی</button><button class="btn" data-close>بعداً</button></div>`);
     $('#arr-enter', box).onclick = () => { closeModal(); this.onEnter(m.id); };
   }
 
-  // Once per visit: point out the nearest mall with discounts when it's within walking distance.
+  // Once per visit: point out the nearest mall with live discounts when it's within walking distance.
   checkNearby() {
     if (this.nearbyShown || this.nav || this.here) return;
     const p = geo.pos;
@@ -417,23 +740,19 @@ export class CityView {
     nav.route = await route(pos, target, mode);
     if (this.nav !== nav) return;
     this.drawRoute();
-    const b = L.latLngBounds([...nav.route.coords, [pos.lat, pos.lng]]);
-    this.map.fitBounds(b, { paddingTopLeft: [30, 200], paddingBottomRight: [30, 40] });
+    const b = new maplibregl.LngLatBounds(ll(pos), ll(pos));
+    for (const [lat, lng] of nav.route.coords) b.extend([lng, lat]);
+    this.map.fitBounds(b, { padding: { ...this.padding(), top: 230 }, maxZoom: 16, duration: 900 });
     this.updateNav();
   }
 
   drawRoute() {
     const nav = this.nav;
-    nav.line?.remove();
-    const dash = nav.route.real ? null : '8 10';
-    nav.line = L.layerGroup([
-      L.polyline(nav.route.coords, { color: '#000', weight: 10, opacity: 0.5, interactive: false }),
-      L.polyline(nav.route.coords, { color: '#c04cff', weight: 6, dashArray: dash, className: 'nav-line', interactive: false }),
-      L.marker(nav.route.coords[nav.route.coords.length - 1], {
-        interactive: false,
-        icon: L.divIcon({ className: 'blip-icon', html: '<div class="dest-pin">🏁</div>', iconSize: [30, 30], iconAnchor: [15, 28] }),
-      }),
-    ]).addTo(this.map);
+    this.setData('pj-route', this.routeData());
+    this.dashRoute();
+    const end = nav.route.coords[nav.route.coords.length - 1];
+    nav.dest?.remove();
+    nav.dest = new maplibregl.Marker({ element: pin('<div class="dest-pin">🏁</div>'), anchor: 'bottom' }).setLngLat([end[1], end[0]]).addTo(this.map);
   }
 
   updateNav() {
@@ -490,8 +809,8 @@ export class CityView {
       <div class="nav-actions">
         <div class="seg">${Object.entries(MODES).map(([k, v]) => `<button data-mode="${k}" class="${k === nav.mode ? 'on' : ''}">${v}</button>`).join('')}</div>
         ${nav.started ? '' : '<button class="btn small primary" id="nav-start">▶ شروع</button>'}
-        <button class="btn small" id="nav-ext">🔗</button>
-        <button class="btn small danger" id="nav-end">✕</button>
+        <button class="btn small" id="nav-ext" aria-label="باز کردن در برنامه دیگر">🔗</button>
+        <button class="btn small danger" id="nav-end" aria-label="پایان">✕</button>
       </div>
       <div class="ext-links hidden" id="nav-links">باز کردن در: ${externalNav(nav.target, nav.target.name).map((x) => `<a target="_blank" rel="noopener" href="${esc(x.href)}">${esc(x.label)}</a>`).join(' · ')}</div>`;
     for (const b of $$('[data-mode]', el)) b.onclick = () => b.dataset.mode !== nav.mode && this.navigate(nav.target, b.dataset.mode);
@@ -502,7 +821,7 @@ export class CityView {
       start.onclick = () => {
         nav.started = true;
         this.setFollow(true);
-        if (geo.pos) this.map.setView([geo.pos.lat, geo.pos.lng], 17);
+        if (geo.pos) this.camera(geo.pos);
         this.keepAwake();
         this.renderNav();
       };
@@ -517,7 +836,9 @@ export class CityView {
     const nav = this.nav;
     if (!nav) return;
     this.nav = null;
-    nav.line?.remove();
+    nav.dest?.remove();
+    this.setData('pj-route', EMPTY);
+    if (nav.started) this.map.easeTo({ pitch: 0, bearing: 0, duration: 600 });
     this.wake?.release().catch(() => {});
     this.wake = null;
     this.renderNav();
@@ -545,7 +866,7 @@ export class CityView {
         <button class="btn danger" id="car-clear">برداشتن</button>
       </div>`);
     $('#car-go', box).onclick = () => this.navigate({ id: 'car', name: 'ماشین شما', lat: this.car.lat, lng: this.car.lng }, 'foot');
-    $('#car-show', box).onclick = () => { closeModal(); this.setFollow(false); this.map.flyTo([this.car.lat, this.car.lng], 18); };
+    $('#car-show', box).onclick = () => { closeModal(); this.setFollow(false); this.map.flyTo({ center: ll(this.car), zoom: 18 }); };
     $('#car-share', box).onclick = () => this.share(this.car, 'محل پارک ماشین');
     $('#car-clear', box).onclick = () => {
       closeModal();
@@ -575,10 +896,8 @@ export class CityView {
 
   drawCar() {
     this.carMarker?.remove();
-    this.carMarker = L.marker([this.car.lat, this.car.lng], {
-      zIndexOffset: 900,
-      icon: L.divIcon({ className: 'blip-icon', html: '<div class="blip car-blip">🚗</div>', iconSize: [34, 34], iconAnchor: [17, 17] }),
-    }).addTo(this.map).on('click', () => this.carMenu());
+    this.carMarker = new maplibregl.Marker({ element: pin('<div class="blip car-blip">🚗</div>') }).setLngLat(ll(this.car)).addTo(this.map);
+    this.carMarker.getElement().addEventListener('click', (e) => { e.stopPropagation(); this.carMenu(); });
     this.renderPark();
   }
 
@@ -591,6 +910,7 @@ export class CityView {
   // ---------- friends ----------
 
   setFriends(list) {
+    if (!this.map) return;
     this.friendMarkers ??= new Map();
     const seen = new Set();
     for (const f of list) {
@@ -598,25 +918,22 @@ export class CityView {
       seen.add(f.id);
       let mk = this.friendMarkers.get(f.id);
       if (!mk) {
-        mk = L.marker([f.lat, f.lng], { zIndexOffset: 950 }).addTo(this.map);
-        mk.on('click', () => this.onFriend?.(mk.friend));
+        mk = new maplibregl.Marker({ element: pin('') }).setLngLat(ll(f)).addTo(this.map);
+        mk.getElement().addEventListener('click', (e) => { e.stopPropagation(); this.onFriend?.(mk.friend); });
         this.friendMarkers.set(f.id, mk);
       }
       mk.friend = f;
-      mk.setLatLng([f.lat, f.lng]);
+      mk.setLngLat(ll(f));
       const key = `${f.emoji}|${f.name}|${f.mallName}`;
       if (mk.key !== key) {
         mk.key = key;
-        mk.setIcon(L.divIcon({
-          className: 'blip-icon', iconSize: [34, 34], iconAnchor: [17, 17],
-          html: `<div class="blip friend-blip">${esc(f.emoji)}<span class="blip-label">${esc(f.name)}${f.mallName ? ` · ${esc(f.mallName)}` : ''}</span></div>`,
-        }));
+        mk.getElement().innerHTML = `<div class="blip friend-blip">${esc(f.emoji)}<span class="blip-label">${esc(f.name)}${f.mallName ? ` · ${esc(f.mallName)}` : ''}</span></div>`;
       }
     }
     for (const [id, mk] of this.friendMarkers) if (!seen.has(id)) { mk.remove(); this.friendMarkers.delete(id); }
   }
 
-  // ---------- search ----------
+  // ---------- search: malls by name, then shops and products ----------
 
   bindSearch() {
     const input = $('#city-search');
@@ -624,26 +941,39 @@ export class CityView {
     const run = debounce(async () => {
       const q = input.value.trim();
       if (q.length < 2) return box.classList.add('hidden');
+      const qt = tokens(q);
+      const near = (m) => this.dist(m) ?? distance(this.map.getCenter(), m);
+      const malls = this.malls
+        .map((m) => ({ m, score: matchScore(qt, `${m.name} ${m.nameEn ?? ''} ${m.area ?? ''} ${m.street ?? ''}`) }))
+        .filter((x) => x.score >= 1)
+        .sort((a, b) => near(a.m) - near(b.m))
+        .slice(0, 6);
       const results = await api(`/search?q=${encodeURIComponent(q)}`).catch(() => []);
+      if (input.value.trim() !== q) return;
       box.classList.remove('hidden');
-      if (!results.length) {
-        box.innerHTML = `<div class="empty">چیزی پیدا نشد.<br><button class="btn primary small" data-action="request" data-q="${esc(q)}">📣 درخواست بده تا فروشنده‌ها خبردار شوند</button></div>`;
-        return;
-      }
-      // Nearest first among equally good matches.
-      const d = (r) => this.dist(this.mall(r.store.mallId)) ?? 0;
-      results.sort((a, b) => b.score - a.score || d(a) - d(b) || a.product.price - b.product.price);
-      box.innerHTML = (geo.best ? '<div class="results-note">📍 مرتب‌شده بر اساس نزدیکی به شما</div>' : '') + results.map((r, i) => `
+      const d = (r) => { const m = this.mall(r.store.mallId); return (m && this.dist(m)) ?? 0; };
+      results.sort((a, b) => b.score - a.score || d(a) - d(b) || (a.product?.price ?? 0) - (b.product?.price ?? 0));
+      box.innerHTML = (malls.length ? `<div class="results-note">مراکز خرید</div>${malls.map(({ m }) => `
+        <div class="result" data-mall="${m.id}">
+          <div class="ico">🏬</div>
+          <div class="main"><div class="title">${esc(m.name)}</div><div class="sub">${[KIND[m.kind], m.area].filter(Boolean).map(esc).join(' · ')}</div></div>
+          ${this.dist(m) != null ? `<div class="price dist">${fmtDist(this.dist(m))}</div>` : ''}
+        </div>`).join('')}` : '')
+        + (results.length ? `<div class="results-note">فروشگاه‌ها و کالاها${geo.best ? ' · نزدیک‌ترین اول' : ''}</div>${results.map((r, i) => `
         <div class="result" data-i="${i}">
           <div class="ico">${cat(r.store.category).icon}</div>
           <div class="main">
-            <div class="title">${esc(r.product.name)} ${r.store.discount ? `<span class="chip">${fa(r.store.discount.percent)}٪</span>` : ''}</div>
-            <div class="sub">${esc(r.store.name)} · ${esc(r.store.mallName)} · ${esc(r.store.floorName)}${geo.best ? ` · ${fmtDist(d(r))}` : ''}</div>
+            <div class="title">${esc(r.product ? r.product.name : r.store.name)} ${r.store.discount ? `<span class="chip">${fa(r.store.discount.percent)}٪</span>` : ''}</div>
+            <div class="sub">${r.product ? `${esc(r.store.name)} · ` : `${esc(cat(r.store.category).label)} · `}${esc(r.store.mallName)}${geo.best ? ` · ${fmtDist(d(r))}` : ''}</div>
           </div>
-          <div class="price">${toman(finalPrice(r.product, r.store))}</div>
-        </div>`).join('') + `<div class="empty"><button class="btn small" data-action="request" data-q="${esc(q)}">📣 به همه فروشنده‌های «${esc(q)}» خبر بده</button></div>`;
-      for (const el of box.querySelectorAll('.result')) {
+          ${r.product ? `<div class="price">${toman(finalPrice(r.product, r.store))}</div>` : ''}
+        </div>`).join('')}` : '')
+        + `<div class="empty">${malls.length || results.length ? '' : 'چیزی پیدا نشد.<br>'}<button class="btn small ${malls.length || results.length ? '' : 'primary'}" data-action="request" data-q="${esc(q)}">📣 به فروشنده‌های «${esc(q)}» خبر بده</button></div>`;
+      for (const el of box.querySelectorAll('[data-i]')) {
         el.addEventListener('click', () => { box.classList.add('hidden'); this.onResult(results[el.dataset.i]); });
+      }
+      for (const el of box.querySelectorAll('[data-mall]')) {
+        el.addEventListener('click', () => { box.classList.add('hidden'); input.blur(); this.select(el.dataset.mall); });
       }
     }, 250);
     input.addEventListener('input', run);
@@ -651,5 +981,5 @@ export class CityView {
     document.addEventListener('click', (e) => { if (!e.target.closest('#city-view .search')) box.classList.add('hidden'); });
   }
 
-  invalidate() { this.map?.invalidateSize(); }
+  invalidate() { this.map?.resize(); }
 }

@@ -24,7 +24,7 @@ Works on iPhone (Safari) and Android (Chrome) and installs to the home screen as
 - Mall list, search results and price comparisons are sorted by distance. Open/closed status uses Tehran time.
 
 **Malls anywhere in Iran**
-- Panning the map (zoom ≥ 11) or moving more than 5 km asks the server for malls in that area (`GET /api/discover`). The server reads OpenStreetMap once per ~30 km area, stores the results in the db, and generates an indoor map for each (floor count from `building:levels`). Overpass is often unreachable from inside Iran, so building outlines also go through the server (`GET /api/footprint/:mallId`).
+- Tehran is served from the OpenStreetMap snapshot, so it works even when Overpass is blocked inside Iran. Outside Tehran, panning the map (zoom ≥ 11) or moving more than 5 km asks the server for malls in that area (`GET /api/discover`); it reads OpenStreetMap once per ~30 km area and stores the results in the db. Outlines come from the server (`GET /api/footprint/:mallId`, `GET /api/footprints?lat=&lng=`).
 
 **Inside a mall (`#/mall/<id>`)**
 - Floor-by-floor map: stores colored by category, atriums, escalators (پله برقی, animated, up and down), elevators, stairs, restrooms, prayer room, ATM, info desk, first aid, fire exits, food court, cinema, kids area, and parking levels with numbered spots.
@@ -44,25 +44,28 @@ Works on iPhone (Safari) and Android (Chrome) and installs to the home screen as
 3. The store calls the shopper (`tel:`) or sends a price offer, which arrives live with call and directions buttons.
 4. Sellers can also set a discount, which is announced live to shoppers in or near the mall, and add products.
 
-## Data: what's real and what's sample
+## Data: all real, nothing generated
 
 | Data | Source |
 |---|---|
-| Mall list, approximate centers | `lib/seed.js` (`MALL_DEFS`). Corrected from OpenStreetMap in the browser |
-| Building outlines | OpenStreetMap, live |
-| Indoor layouts, stores, products, prices, discounts, phone numbers | **Generated sample data** (deterministic per mall). Phone numbers use the fake `021-0000-xxxx` range |
-| Malls outside the curated Tehran list | OpenStreetMap via the server (`shop=mall`), cached in the db |
-| Requests, offers, seller edits, discovered malls, outlines | Neon Postgres when `DATABASE_URL` is set (Vercel), otherwise `data/db.json` (created on first use) |
-| Friends' live positions | Neon `presence` table, or memory for the file db; expire after 2 minutes |
+| Every mall, passage (پاساژ) and bazaar in Tehran: 775, incl. Amin Hozour, Lalehzar, Jomhouri/Alaedin, the Grand Bazaar, Tehranpars, Tajrish | OpenStreetMap snapshot in `data/tehran.json` (`npm run data` refreshes it) |
+| Building outlines, opening hours, phone, website, Instagram, neighbourhood | Same snapshot (OpenStreetMap tags) |
+| Shops inside malls (~880, with category, floor when tagged, phone, hours) | OpenStreetMap shops inside each mall's outline, placed in the unit nearest their real position |
+| Floors and parking of the big malls (Iran Mall, Palladium, Sana, Opal, Kourosh, Arg, Tandis, Charsou, Alaedin, Amin Hozour) | `CURATED` in `lib/seed.js` |
+| Malls outside Tehran | OpenStreetMap via the server (`GET /api/discover`), cached in the db |
+| Shops that register themselves, products, prices, discounts | The seller panel: pick an empty unit, enter name, category, phone and hours (`POST /api/stores/:id/profile`) |
+| Requests, offers, seller edits, discovered malls | Neon Postgres when `DATABASE_URL` is set, otherwise `data/db.json` |
 | Parking, shopping list, favorites | This device only (`localStorage`) |
 
-Real indoor floor plans of Tehran malls aren't public. To use a surveyed plan, put it in `data/layouts/<mallId>.json` as `{ "floors": [...] }`. It replaces the generated layout. Copy the shape from `GET /api/malls/<mallId>`: each floor has `walk`, `stores` (with `door` and `entry`), `voids`, `escalators`, `elevators`, `stairs` and `amenities`, in 1 m grid cells.
+No store names, prices, phone numbers, ratings or discounts are made up. Real indoor floor plans of Tehran malls aren't public, so each mall gets a **schematic** plan sized to its real footprint; units without a known shop are shown grey ("ثبت‌نشده") until a shop claims one. To use a surveyed plan, put it in `data/layouts/<mallId>.json` as `{ "floors": [...] }` (copy the shape from `GET /api/malls/<mallId>`).
 
-`OVERPASS_URL` overrides the Overpass server (useful for tests). To curate a mall by hand, append it to `MALL_DEFS` in `lib/seed.js`, with `osm` set to a name regex used to find it on OpenStreetMap.
+**Map**: MapLibre GL with OpenFreeMap vector tiles (no API key, Persian labels), falling back to the standard OpenStreetMap raster tiles if OpenFreeMap is unreachable. Malls cluster when zoomed out; names and real outlines appear from zoom 14. District chips jump to Amin Hozour, Tehranpars, Jomhouri & Alaedin, Lalehzar, the Grand Bazaar, Tajrish, Sadeghieh and Vanak.
+
+**GPS**: a quick Wi-Fi/cell fix shows the user immediately while GPS locks; fixes that jump faster than 85 m/s beyond their accuracy circles are dropped (GPS spoofing in Tehran); arrival detection uses real outlines and ignores fixes worse than 100 m.
 
 ## Before going live
 
-- The seller panel has **no authentication**. Anyone can pick any store. Add real seller accounts (for example SMS OTP) before real use.
+- The seller panel has **no authentication**. Anyone can pick any store or register a shop in any empty unit. Add real seller accounts (for example SMS OTP) before real use.
 - Shopper identity is a random ID in `localStorage`.
 - Without `DATABASE_URL`, `data/db.json` is a single-process JSON store. On Vercel, connect a Neon database (Storage → Neon) so data is shared and persistent; tables are created automatically.
 
